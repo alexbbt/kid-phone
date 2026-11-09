@@ -56,6 +56,10 @@
  *   mqtt_user, mqtt_pass       (missing = 1883), optional login; the password is never sent
  *                              back to the setup page (has_password only). Twilio Auth Token,
  *                              SIP password and restricted key secret are never published.
+ *   cloud_url                  Bell-Towne app base URL (default https://app.bell-towne.com)
+ *   cloud_uuid                 device UUID from pairing (empty = not paired)
+ *   cloud_atok, cloud_rtok     access + refresh tokens (never returned to the setup page)
+ *   cloud_code                 pairing code while waiting for a manager to claim it
  * Every secret key is optional: a phone set up before 0.6.0 has none, and
  * missing keys mean the feature is off. Empty values are erased, not written
  * (24 slots of empty keys would fill the small NVS partition).
@@ -322,6 +326,23 @@ esp_err_t config_set_secret(const cfg_secret_t *s, bool keep_pass);
 void config_get_mqtt(cfg_mqtt_t *out);
 bool config_mqtt_enabled(void);
 esp_err_t config_set_mqtt(const cfg_mqtt_t *m, bool keep_pass);
+
+/* Bell-Towne cloud pairing credentials. Tokens never leave the phone except
+ * on HTTPS Authorization headers. get_cloud copies tokens (wipe when done). */
+typedef struct {
+    char base_url[96];
+    char device_uuid[40];
+    char access_token[96];
+    char refresh_token[128];
+    char pair_code[8];
+} cfg_cloud_t;
+
+void config_get_cloud(cfg_cloud_t *out);
+bool config_cloud_paired(void);
+esp_err_t config_set_cloud_url(const char *url);
+esp_err_t config_set_cloud_pairing_code(const char *code);
+esp_err_t config_set_cloud_tokens(const char *device_uuid, const char *access, const char *refresh);
+esp_err_t config_clear_cloud(void);
 
 /* Secret mode of slot idx (CFG_SECRET_*), and its email into email (may be
  * NULL). Cheap: no whole-contact copy. */

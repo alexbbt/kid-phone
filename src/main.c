@@ -48,6 +48,7 @@
 
 #include "app_config.h"
 #include "audio_engine.h"
+#include "cloud_sync.h"
 #include "config_store.h"
 #include "improv.h"
 #include "contact_leds.h"
@@ -234,6 +235,7 @@ static void check_call_result(uint32_t *seen)
     sip_result_t r;
     sip_last_result(&r);
     atomic_store(&s_cooldown_until_ms, now_ms() + APP_PRESS_COOLDOWN_MS);
+    /* Map SIP outcomes to cloud call-log vocabulary. */
     const char *outcome = "answered";
     if (r.kind[0] == '\0') {
         outcome = "answered";
@@ -254,6 +256,7 @@ static void check_call_result(uint32_t *seen)
     const char *name = (r.contact >= 0 && config_get_contact(r.contact, &c)) ? c.name : "";
     const int64_t end = now_ms();
     const int64_t start = end - (int64_t)r.talk_ms;
+    cloud_sync_log_event(r.contact, name, outcome, r.talk_ms, start > 0 ? start : end, end);
     prompt_id_t p = prompt_for_result(&r);
     bool busy = r.failed || strcmp(r.kind, "unreachable") == 0;
     if (p != PROMPT_NONE || busy) {
@@ -411,6 +414,19 @@ static void refuse(int idx, prompt_id_t p, int busy_ms)
 {
     if (s_run.slot == idx) {
         s_run.told = true;
+    }
+    /* Cloud telemetry for local refuses (never dialed). */
+    const char *outcome = NULL;
+    if (p == PROMPT_SLEEP_TIME) {
+        outcome = "bedtime";
+    } else if (p == PROMPT_UNAVAILABLE) {
+        outcome = "blocked";
+    }
+    if (outcome) {
+        cfg_contact_t c;
+        const char *name = config_get_contact(idx, &c) ? c.name : "";
+        const int64_t t = now_ms();
+        cloud_sync_log_event(idx, name, outcome, 0, t, t);
     }
     feedback(p, busy_ms);
 }
@@ -778,6 +794,7 @@ void app_main(void)
      * broker is down. */
     mqtt_ha_start();
     /* Outbound HTTPS sync to app.bell-towne.com (optional; calling works offline). */
+    cloud_sync_start();
     status_led_start();
     schedule_start();
     contact_leds_start();

@@ -138,6 +138,7 @@ footer { color: var(--muted); font-size: 14px; text-align: center; margin-top: 2
     <div class="row"><span>Clock</span><span id="s-clock">...</span></div>
     <div class="row"><span>Calls come from</span><span id="s-from">...</span></div>
     <div class="row" id="r-mqtt"><span>Home Assistant</span><span><span id="s-mqtt">...</span><a class="jump" href="#c-mqtt" id="l-mqtt">MQTT</a></span></div>
+    <div class="row" id="r-cloud"><span>Bell-Towne cloud</span><span><span id="s-cloud">...</span><a class="jump" href="#c-cloud" id="l-cloud">Pair</a></span></div>
     <div class="row hidden" id="r-key"><span>Changing numbers</span><span id="s-key">...</span></div>
     <div class="row hidden" id="r-secret"><span>Secret messages</span><span><span id="s-secret">...</span><a class="jump" href="#c-secret" id="l-secret">Settings</a></span></div>
     <div class="note hidden" id="old-login">This phone still uses the shared login from older software. Press <b>Run setup again</b> below to give it its own.</div>
@@ -316,6 +317,19 @@ footer { color: var(--muted); font-size: 14px; text-align: center; margin-top: 2
     <div class="alert hidden" id="call-err"><b id="call-err-t"></b><span class="small" id="call-err-code"></span></div>
   </section>
 
+  <section class="card" id="c-cloud">
+    <h2>Bell-Towne cloud</h2>
+    <p>Optional. Pair this phone with the Bell-Towne family app so parents can see call history and people you call can edit their own available hours. The phone always reaches out over HTTPS — no port forwards. Local setup and Home Assistant keep working.</p>
+    <p id="cloud-status"></p>
+    <div class="note hidden" id="cloud-code-box">
+      <b>Pairing code</b>
+      <div id="cloud-code" style="font-size: 28px; letter-spacing: 0.2em; font-weight: 700; margin: 8px 0"></div>
+      <p class="hint">Enter this code in the Bell-Towne Kid Phone app. It expires in about 15 minutes.</p>
+    </div>
+    <button type="button" id="b-cloud-pair">Show pairing code</button>
+    <button type="button" class="secondary hidden" id="b-cloud-unlink">Unlink</button>
+    <p class="hint" id="cloud-msg"></p>
+  </section>
 
   <section class="card" id="c-mqtt">
     <h2>Home Assistant (MQTT)</h2>
@@ -886,6 +900,7 @@ function render() {
     w.connected ? "good" : "bad");
   renderWifi(w);
   renderMqtt();
+  renderCloud();
   setText("s-tw", t.provisioned ? "Ready" : "Not set up yet", t.provisioned ? "good" : "bad");
   setText("s-hs", st.handset ? "Plugged in" : "Not detected (plug it into the USB port marked OTG)", st.handset ? "good" : "bad");
   setText("s-clock", st.time_synced ? "Synced" : "Clock not synced (calls are allowed at any time until it is)", st.time_synced ? "good" : "bad");
@@ -1668,6 +1683,24 @@ function renderMqtt() {
   setText("s-mqtt", text, cls);
 }
 
+function renderCloud() {
+  const c = st.cloud || {};
+  let text = "Not paired", cls = "";
+  if (c.paired) { text = "Paired"; cls = "good"; }
+  else if (c.pairing && c.pair_code) { text = "Waiting (" + c.pair_code + ")"; cls = "bad"; }
+  else if (c.last_error) { text = "Error"; cls = "bad"; }
+  setText("s-cloud", text, cls);
+  setText("cloud-status", c.paired
+    ? "Paired with Bell-Towne" + (c.device_uuid ? " (" + c.device_uuid.slice(0, 8) + "…)" : "") +
+      (c.last_error ? ". Last sync note: " + c.last_error : ".")
+    : (c.pairing ? "Waiting for a manager to enter the code in the app." :
+      "Not paired. Show a pairing code, then enter it in the Bell-Towne Kid Phone app."), cls);
+  show("cloud-code-box", !!(c.pairing && c.pair_code));
+  if (c.pair_code) $("cloud-code").textContent = c.pair_code;
+  show("b-cloud-unlink", !!c.paired);
+  $("b-cloud-pair").textContent = c.paired ? "Show new pairing code" : (c.pairing ? "Get a new code" : "Show pairing code");
+  $("b-cloud-pair").disabled = !(st.wifi && st.wifi.connected);
+}
 
 async function saveMqtt() {
   const host = $("mqtt-host").value.trim();
@@ -1706,6 +1739,29 @@ $("l-mqtt").addEventListener("click", (ev) => {
   history.replaceState(null, "", "#c-mqtt");
 });
 
+$("l-cloud").addEventListener("click", (ev) => {
+  ev.preventDefault();
+  $("c-cloud").scrollIntoView({behavior: "smooth", block: "start"});
+  history.replaceState(null, "", "#c-cloud");
+});
+$("b-cloud-pair").addEventListener("click", async () => {
+  $("b-cloud-pair").disabled = true;
+  $("cloud-msg").textContent = "Contacting Bell-Towne…";
+  let r;
+  try { r = await api("/api/cloud/pair", {}); } catch (e) { r = {ok: false, j: {}}; }
+  $("cloud-msg").textContent = r.ok ? (r.j.message || "Code ready.") : (r.j.error || "Could not start pairing. Check WiFi and try again.");
+  $("b-cloud-pair").disabled = false;
+  kick();
+});
+$("b-cloud-unlink").addEventListener("click", async () => {
+  if (!confirm("Unlink this phone from Bell-Towne? Calling still works here.")) return;
+  $("b-cloud-unlink").disabled = true;
+  let r;
+  try { r = await api("/api/cloud/unlink", {}); } catch (e) { r = {ok: false, j: {}}; }
+  $("cloud-msg").textContent = r.ok ? (r.j.message || "Unlinked.") : (r.j.error || "Could not unlink.");
+  $("b-cloud-unlink").disabled = false;
+  kick();
+});
 
 $("b-tw-cancel").addEventListener("click", () => {
   /* The edits stay in the form, unsaved. */

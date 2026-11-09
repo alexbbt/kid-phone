@@ -18,6 +18,7 @@
 #include "app_config.h"
 #include "audio_engine.h"
 #include "cfg_edit.h"
+#include "cloud_sync.h"
 #include "config_store.h"
 #include "modes.h"
 #include "mqtt_ha.h"
@@ -401,7 +402,22 @@ static esp_err_t h_status(httpd_req_t *req)
     cJSON_AddBoolToObject(mq, "has_password", c->mqtt.pass[0] != '\0');
     cJSON_AddStringToObject(mq, "state", mqtt_ha_state_name());
     cJSON_AddBoolToObject(mq, "connected", mqtt_ha_connected());
+    /* Bell-Towne cloud: paired state and pairing code only — never tokens. */
+    cloud_sync_status_t cs;
+    cloud_sync_status(&cs);
+    cJSON *cloud = cJSON_AddObjectToObject(o, "cloud");
+    cJSON_AddBoolToObject(cloud, "paired", cs.paired);
+    cJSON_AddBoolToObject(cloud, "pairing", cs.pairing);
+    cJSON_AddStringToObject(cloud, "pair_code", cs.pair_code);
+    cJSON_AddStringToObject(cloud, "device_uuid", cs.device_uuid);
+    cJSON_AddStringToObject(cloud, "base_url", cs.base_url);
+    cJSON_AddStringToObject(cloud, "last_error", cs.last_error);
+    config_wipe(c);
+    free(c);
+    cJSON_AddBoolToObject(o, "time_synced", schedule_time_synced());
 
+    cJSON_AddBoolToObject(o, "handset", usb_audio_handset_connected());
+    handset_json(cJSON_AddObjectToObject(o, "handset_info"));
 
     cJSON *call = cJSON_AddObjectToObject(o, "call");
     cJSON_AddStringToObject(call, "state", sip_call_state_name(sip_call_state()));
@@ -1189,7 +1205,48 @@ static esp_err_t h_mqtt(httpd_req_t *req)
     return send_msg(req, "200 OK", true, "Saved.");
 }
 
+/* POST /api/cloud/pair: show a pairing code for a household manager to enter
+ * in the Bell-Towne app. The phone polls until tokens are issued. */
+static esp_err_t h_cloud_pair(httpd_req_t *req)
+{
+    if (!host_ok(req)) {
+        return send_msg(req, "403 Forbidden", false, "bad host");
+    }
+    if (!wifi_is_connected()) {
+        return send_msg(req, "409 Conflict", false, "The phone is not on WiFi.");
+    }
+    char code[8];
+    esp_err_t err = cloud_sync_pair_begin(code, sizeof(code));
+    if (err == ESP_ERR_INVALID_STATE) {
+        return send_msg(req, "409 Conflict", false, "The phone is not on WiFi.");
+    }
+    if (err != ESP_OK) {
+        return send_msg(req, "502 Bad Gateway", false, "Could not reach the Bell-Towne app. Try again.");
+    }
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddBoolToObject(o, "ok", true);
+    cJSON_AddStringToObject(o, "code", code);
+    cJSON_AddStringToObject(o, "message", "Enter this code in the Bell-Towne Kid Phone app.");
+    return send_json(req, "200 OK", o);
+}
 
+/* POST /api/cloud/unlink: drop cloud tokens. Calling still works locally. */
+static esp_err_t h_cloud_unlink(httpd_req_t *req)
+{
+    if (!host_ok(req)) {
+        return send_msg(req, "403 Forbidden", false, "bad host");
+    }
+    if (cloud_sync_unlink() != ESP_OK) {
+        return send_msg(req, "500 Internal Server Error", false, "Could not unlink. Try again.");
+    }
+    return send_msg(req, "200 OK", true, "Unlinked from Bell-Towne. Calling still works on this phone.");
+}
+
+/* ---------------------------------------------------------------------------
+ * WiFi networks
+ * ------------------------------------------------------------------------- */
+
+/* GET /api/wifi: what the phone is on, its signal, and the saved list. */
 static esp_err_t h_wifi(httpd_req_t *req)
 {
     if (!host_ok(req)) {
@@ -1445,7 +1502,7 @@ void setup_server_start(void)
     cfg.server_port = APP_HTTP_PORT;
     cfg.stack_size = APP_HTTP_STACK;
     cfg.max_open_sockets = 5;
-    cfg.max_uri_handlers = 19; /* 19 registered */
+    cfg.max_uri_handlers = 21; /* 21 registered */
     cfg.lru_purge_enable = true;
     cfg.core_id = 0;
     httpd_handle_t srv = NULL;
@@ -1467,6 +1524,8 @@ void setup_server_start(void)
         {.uri = "/api/secret", .method = HTTP_POST, .handler = h_secret},
         {.uri = "/api/secret/test", .method = HTTP_POST, .handler = h_secret_test},
         {.uri = "/api/mqtt", .method = HTTP_POST, .handler = h_mqtt},
+        {.uri = "/api/cloud/pair", .method = HTTP_POST, .handler = h_cloud_pair},
+        {.uri = "/api/cloud/unlink", .method = HTTP_POST, .handler = h_cloud_unlink},
         {.uri = "/api/call", .method = HTTP_POST, .handler = h_call},
         {.uri = "/api/hangup", .method = HTTP_POST, .handler = h_hangup},
         {.uri = "/api/factory_reset", .method = HTTP_POST, .handler = h_factory_reset},
@@ -1475,7 +1534,7 @@ void setup_server_start(void)
         {.uri = "/api/wifi/add", .method = HTTP_POST, .handler = h_wifi_add},
         {.uri = "/api/wifi/remove", .method = HTTP_POST, .handler = h_wifi_remove},
     };
-    _Static_assert(sizeof(uris) / sizeof(uris[0]) <= 19, "raise max_uri_handlers");
+    _Static_assert(sizeof(uris) / sizeof(uris[0]) <= 21, "raise max_uri_handlers");
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
         esp_err_t e = httpd_register_uri_handler(srv, &uris[i]);
         if (e != ESP_OK) {

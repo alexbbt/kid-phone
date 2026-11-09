@@ -22,6 +22,7 @@ static const char *TAG = "config";
 static const char *NS = "kidphone";
 
 static app_cfg_t s_cfg;
+static cfg_cloud_t s_cloud;
 static SemaphoreHandle_t s_lock;
 static uint32_t s_gen;
 
@@ -220,11 +221,29 @@ static void secret_defaults(cfg_secret_t *s)
     s->cap_hr = APP_SECRET_CAP_DEFAULT;
 }
 
-
 static void mqtt_defaults(cfg_mqtt_t *m)
 {
     memset(m, 0, sizeof(*m));
     m->port = 1883;
+}
+
+static void cloud_defaults(cfg_cloud_t *c)
+{
+    memset(c, 0, sizeof(*c));
+    strlcpy(c->base_url, APP_CLOUD_BASE_URL_DEFAULT, sizeof(c->base_url));
+}
+
+static void load_cloud(nvs_handle_t h, cfg_cloud_t *c)
+{
+    cloud_defaults(c);
+    get_str(h, "cloud_url", c->base_url, sizeof(c->base_url));
+    if (!c->base_url[0]) {
+        strlcpy(c->base_url, APP_CLOUD_BASE_URL_DEFAULT, sizeof(c->base_url));
+    }
+    get_str(h, "cloud_uuid", c->device_uuid, sizeof(c->device_uuid));
+    get_str(h, "cloud_atok", c->access_token, sizeof(c->access_token));
+    get_str(h, "cloud_rtok", c->refresh_token, sizeof(c->refresh_token));
+    get_str(h, "cloud_code", c->pair_code, sizeof(c->pair_code));
 }
 
 /* Secret settings: every key optional (firmware before 0.6.0 wrote none). */
@@ -279,6 +298,7 @@ static void load(void)
     pins_defaults(&s_cfg.pins);
     secret_defaults(&s_cfg.secret);
     mqtt_defaults(&s_cfg.mqtt);
+    cloud_defaults(&s_cloud);
     nvs_handle_t h;
     if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) {
         return; /* namespace does not exist yet: empty config */
@@ -347,6 +367,7 @@ static void load(void)
     load_pins(h, &s_cfg.pins);
     load_secret(h, &s_cfg.secret);
     load_mqtt(h, &s_cfg.mqtt);
+    load_cloud(h, &s_cloud);
     /* Missing (every phone before 0.7.0) or unknown = English. */
     uint8_t lang = PROMPT_LANG_EN;
     if (nvs_get_u8(h, "lang", &lang) == ESP_OK && lang < PROMPT_LANG_COUNT) {
@@ -1141,7 +1162,6 @@ uint8_t config_slot_secret(int idx, char *email, size_t len)
     return m;
 }
 
-
 void config_get_mqtt(cfg_mqtt_t *out)
 {
     lock();
@@ -1215,6 +1235,129 @@ bool config_has_twilio_key(void)
     return r;
 }
 
+void config_get_cloud(cfg_cloud_t *out)
+{
+    lock();
+    *out = s_cloud;
+    unlock();
+}
+
+bool config_cloud_paired(void)
+{
+    lock();
+    bool ok = s_cloud.device_uuid[0] && s_cloud.refresh_token[0];
+    unlock();
+    return ok;
+}
+
+esp_err_t config_set_cloud_url(const char *url)
+{
+    if (!url || !url[0] || strlen(url) >= sizeof(s_cloud.base_url)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (strncmp(url, "https://", 8) != 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = put_str(h, "cloud_url", url);
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    if (err == ESP_OK) {
+        lock();
+        strlcpy(s_cloud.base_url, url, sizeof(s_cloud.base_url));
+        s_gen++;
+        unlock();
+    }
+    nvs_close(h);
+    return err == ESP_OK ? ESP_OK : ESP_FAIL;
+}
+
+esp_err_t config_set_cloud_pairing_code(const char *code)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    lock();
+    if (code && code[0]) {
+        strlcpy(s_cloud.pair_code, code, sizeof(s_cloud.pair_code));
+        err = put_str(h, "cloud_code", s_cloud.pair_code);
+    } else {
+        s_cloud.pair_code[0] = '\0';
+        err = erase_key(h, "cloud_code");
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    s_gen++;
+    unlock();
+    nvs_close(h);
+    return err == ESP_OK ? ESP_OK : ESP_FAIL;
+}
+
+esp_err_t config_set_cloud_tokens(const char *device_uuid, const char *access, const char *refresh)
+{
+    if (!device_uuid || !device_uuid[0] || !access || !access[0] || !refresh || !refresh[0]) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (strlen(device_uuid) >= sizeof(s_cloud.device_uuid) || strlen(access) >= sizeof(s_cloud.access_token) ||
+        strlen(refresh) >= sizeof(s_cloud.refresh_token)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    lock();
+    strlcpy(s_cloud.device_uuid, device_uuid, sizeof(s_cloud.device_uuid));
+    strlcpy(s_cloud.access_token, access, sizeof(s_cloud.access_token));
+    strlcpy(s_cloud.refresh_token, refresh, sizeof(s_cloud.refresh_token));
+    s_cloud.pair_code[0] = '\0';
+    err |= put_str(h, "cloud_uuid", s_cloud.device_uuid);
+    err |= put_str(h, "cloud_atok", s_cloud.access_token);
+    err |= put_str(h, "cloud_rtok", s_cloud.refresh_token);
+    err |= erase_key(h, "cloud_code");
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    s_gen++;
+    unlock();
+    nvs_close(h);
+    return err == ESP_OK ? ESP_OK : ESP_FAIL;
+}
+
+esp_err_t config_clear_cloud(void)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    lock();
+    mbedtls_platform_zeroize(s_cloud.access_token, sizeof(s_cloud.access_token));
+    mbedtls_platform_zeroize(s_cloud.refresh_token, sizeof(s_cloud.refresh_token));
+    s_cloud.device_uuid[0] = '\0';
+    s_cloud.pair_code[0] = '\0';
+    err |= erase_key(h, "cloud_uuid");
+    err |= erase_key(h, "cloud_atok");
+    err |= erase_key(h, "cloud_rtok");
+    err |= erase_key(h, "cloud_code");
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    s_gen++;
+    unlock();
+    nvs_close(h);
+    return err == ESP_OK ? ESP_OK : ESP_FAIL;
+}
+
 esp_err_t config_factory_reset(void)
 {
     nvs_handle_t h;
@@ -1229,6 +1372,8 @@ esp_err_t config_factory_reset(void)
     lock();
     mbedtls_platform_zeroize(&s_cfg, sizeof(s_cfg));
     mbedtls_platform_zeroize(s_wifi, sizeof(s_wifi));
+    mbedtls_platform_zeroize(&s_cloud, sizeof(s_cloud));
+    cloud_defaults(&s_cloud);
     s_nwifi = 0;
     s_cfg.max_call_min = APP_CALL_MAX_MIN_DEFAULT;
     s_cfg.bedtime.start_min = APP_BEDTIME_START_DEFAULT;

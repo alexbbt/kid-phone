@@ -285,6 +285,15 @@
  * twilio_provision.c). */
 #define APP_PROV_HTTP_TRIES     4
 #define APP_PROV_RETRY_MS       1000
+
+/* Bell-Towne cloud sync (outbound HTTPS only). TLS uses the ESP-IDF cert
+ * bundle; never skip validation. Calling works if the app is unreachable. */
+#define APP_CLOUD_BASE_URL_DEFAULT "https://app.bell-towne.com"
+#define APP_CLOUD_SYNC_STACK    12288
+#define APP_CLOUD_SYNC_MS       30000
+#define APP_CLOUD_HTTP_TIMEOUT_MS 20000
+#define APP_CLOUD_LOG_CAPACITY  24
+#define APP_CLOUD_PAIR_POLL_MS  3000
 /* Largest Twilio API response accepted (list pages land in PSRAM). */
 #define APP_PROV_MAX_RESP       (256 * 1024)
 #define APP_PROV_BUILD_TIMEOUT_MS 120000
