@@ -52,6 +52,10 @@
  *                              (0 is erased, not written)
  *   emerg_taps                 u8, quick presses of one button that call past bedtime and the
  *                              schedule (APP_EMERGENCY_TAPS_LO..HI); missing = off (0 is erased)
+ *   mqtt_host, mqtt_port,      Home Assistant MQTT broker: host (empty = MQTT off), u16 port
+ *   mqtt_user, mqtt_pass       (missing = 1883), optional login; the password is never sent
+ *                              back to the setup page (has_password only). Twilio Auth Token,
+ *                              SIP password and restricted key secret are never published.
  * Every secret key is optional: a phone set up before 0.6.0 has none, and
  * missing keys mean the feature is off. Empty values are erased, not written
  * (24 slots of empty keys would fill the small NVS partition).
@@ -154,6 +158,15 @@ typedef struct {
     uint16_t max_s;
 } cfg_secret_opts_t;
 
+/* Home Assistant MQTT broker. enabled = host non-empty (MQTT off until set).
+ * pass never leaves the phone except into the MQTT client. */
+typedef struct {
+    char host[64];
+    uint16_t port;   /* 1..65535, default 1883 */
+    char user[64];
+    char pass[64];   /* never logged or returned to the setup page */
+} cfg_mqtt_t;
+
 /* Which GPIO is each button and its light. Buttons fill slots 0..count-1
  * (slot i = button i = contact i); lamp[i] = -1 for a button with no light.
  * Every pin is in APP_ASSIGNABLE_GPIOS and used once (pins_validate). */
@@ -182,6 +195,7 @@ typedef struct {
     cfg_bedtime_t bedtime;
     cfg_pins_t pins;
     cfg_secret_t secret;
+    cfg_mqtt_t mqtt;
     uint8_t lang;          /* prompt_lang_t, PROMPT_LANG_EN if missing or unknown */
     uint8_t emerg_taps;    /* emergency override presses, 0 = off */
 } app_cfg_t;
@@ -302,11 +316,18 @@ void config_get_secret(cfg_secret_t *out);
 void config_secret_opts(cfg_secret_opts_t *out);
 esp_err_t config_set_secret(const cfg_secret_t *s, bool keep_pass);
 
+/* MQTT broker for Home Assistant discovery. get includes the password (wipe
+ * when done); set with keep_pass leaves the stored password when pass is
+ * empty. Host empty turns MQTT off (keys erased). */
+void config_get_mqtt(cfg_mqtt_t *out);
+bool config_mqtt_enabled(void);
+esp_err_t config_set_mqtt(const cfg_mqtt_t *m, bool keep_pass);
+
 /* Secret mode of slot idx (CFG_SECRET_*), and its email into email (may be
  * NULL). Cheap: no whole-contact copy. */
 uint8_t config_slot_secret(int idx, char *email, size_t len);
 
 /* Erase the whole namespace (all WiFi networks, Twilio, Twilio key, contacts, call length, bedtime,
- * pins, secret messages).
+ * pins, secret messages, MQTT broker).
  * Caller reboots. */
 esp_err_t config_factory_reset(void);

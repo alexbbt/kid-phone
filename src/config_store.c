@@ -220,6 +220,13 @@ static void secret_defaults(cfg_secret_t *s)
     s->cap_hr = APP_SECRET_CAP_DEFAULT;
 }
 
+
+static void mqtt_defaults(cfg_mqtt_t *m)
+{
+    memset(m, 0, sizeof(*m));
+    m->port = 1883;
+}
+
 /* Secret settings: every key optional (firmware before 0.6.0 wrote none). */
 static void load_secret(nvs_handle_t h, cfg_secret_t *s)
 {
@@ -248,6 +255,19 @@ static void load_secret(nvs_handle_t h, cfg_secret_t *s)
     s->bed_ok = v8 == 1;
 }
 
+/* MQTT broker: every key optional (firmware before Home Assistant support). */
+static void load_mqtt(nvs_handle_t h, cfg_mqtt_t *m)
+{
+    mqtt_defaults(m);
+    get_str(h, "mqtt_host", m->host, sizeof(m->host));
+    uint16_t v16 = 0;
+    if (nvs_get_u16(h, "mqtt_port", &v16) == ESP_OK && v16) {
+        m->port = v16;
+    }
+    get_str(h, "mqtt_user", m->user, sizeof(m->user));
+    get_str(h, "mqtt_pass", m->pass, sizeof(m->pass));
+}
+
 static void load(void)
 {
     memset(&s_cfg, 0, sizeof(s_cfg));
@@ -258,6 +278,7 @@ static void load(void)
     s_cfg.bedtime.end_min = APP_BEDTIME_END_DEFAULT;
     pins_defaults(&s_cfg.pins);
     secret_defaults(&s_cfg.secret);
+    mqtt_defaults(&s_cfg.mqtt);
     nvs_handle_t h;
     if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) {
         return; /* namespace does not exist yet: empty config */
@@ -325,6 +346,7 @@ static void load(void)
     get_str(h, "home_tz_name", s_cfg.bedtime.tz_name, sizeof(s_cfg.bedtime.tz_name));
     load_pins(h, &s_cfg.pins);
     load_secret(h, &s_cfg.secret);
+    load_mqtt(h, &s_cfg.mqtt);
     /* Missing (every phone before 0.7.0) or unknown = English. */
     uint8_t lang = PROMPT_LANG_EN;
     if (nvs_get_u8(h, "lang", &lang) == ESP_OK && lang < PROMPT_LANG_COUNT) {
@@ -1119,6 +1141,72 @@ uint8_t config_slot_secret(int idx, char *email, size_t len)
     return m;
 }
 
+
+void config_get_mqtt(cfg_mqtt_t *out)
+{
+    lock();
+    *out = s_cfg.mqtt;
+    unlock();
+}
+
+bool config_mqtt_enabled(void)
+{
+    lock();
+    bool on = s_cfg.mqtt.host[0] != '\0';
+    unlock();
+    return on;
+}
+
+esp_err_t config_set_mqtt(const cfg_mqtt_t *in, bool keep_pass)
+{
+    if (in->host[0] && !in->port) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    cfg_mqtt_t nm = *in;
+    if (!nm.host[0]) {
+        /* Off: erase every MQTT key so a factory-like clear of this feature
+         * does not leave a stale password behind. */
+        memset(&nm, 0, sizeof(nm));
+        nm.port = 1883;
+    } else if (!nm.port) {
+        nm.port = 1883;
+    }
+    lock();
+    if (keep_pass && nm.host[0]) {
+        memcpy(nm.pass, s_cfg.mqtt.pass, sizeof(nm.pass));
+    }
+    err |= put_str(h, "mqtt_host", nm.host);
+    if (nm.host[0]) {
+        err |= nvs_set_u16(h, "mqtt_port", nm.port);
+        err |= put_str(h, "mqtt_user", nm.user);
+        err |= put_str(h, "mqtt_pass", nm.pass);
+    } else {
+        err |= erase_key(h, "mqtt_port");
+        err |= erase_key(h, "mqtt_user");
+        err |= erase_key(h, "mqtt_pass");
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    if (err == ESP_OK) {
+        s_cfg.mqtt = nm;
+    }
+    s_gen++;
+    unlock();
+    nvs_close(h);
+    mbedtls_platform_zeroize(&nm, sizeof(nm));
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "saving MQTT settings failed: %s", esp_err_to_name(err));
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
 bool config_has_twilio_key(void)
 {
     lock();
@@ -1147,6 +1235,7 @@ esp_err_t config_factory_reset(void)
     s_cfg.bedtime.end_min = APP_BEDTIME_END_DEFAULT;
     pins_defaults(&s_cfg.pins);
     secret_defaults(&s_cfg.secret);
+    mqtt_defaults(&s_cfg.mqtt);
     s_gen++;
     unlock();
     ESP_LOGW(TAG, "factory reset: config erased (%s)", esp_err_to_name(err));

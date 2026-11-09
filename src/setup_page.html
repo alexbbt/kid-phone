@@ -137,6 +137,7 @@ footer { color: var(--muted); font-size: 14px; text-align: center; margin-top: 2
     <div class="row"><span>Handset</span><span id="s-hs">...</span></div>
     <div class="row"><span>Clock</span><span id="s-clock">...</span></div>
     <div class="row"><span>Calls come from</span><span id="s-from">...</span></div>
+    <div class="row" id="r-mqtt"><span>Home Assistant</span><span><span id="s-mqtt">...</span><a class="jump" href="#c-mqtt" id="l-mqtt">MQTT</a></span></div>
     <div class="row hidden" id="r-key"><span>Changing numbers</span><span id="s-key">...</span></div>
     <div class="row hidden" id="r-secret"><span>Secret messages</span><span><span id="s-secret">...</span><a class="jump" href="#c-secret" id="l-secret">Settings</a></span></div>
     <div class="note hidden" id="old-login">This phone still uses the shared login from older software. Press <b>Run setup again</b> below to give it its own.</div>
@@ -315,6 +316,30 @@ footer { color: var(--muted); font-size: 14px; text-align: center; margin-top: 2
     <div class="alert hidden" id="call-err"><b id="call-err-t"></b><span class="small" id="call-err-code"></span></div>
   </section>
 
+
+  <section class="card" id="c-mqtt">
+    <h2>Home Assistant (MQTT)</h2>
+    <p>Optional. The phone can show up in Home Assistant so you can change who each button calls, their available times, bedtime and the call length from your phone or computer. Calls still work if the broker is down. Twilio passwords stay on this phone and are never sent over MQTT.</p>
+    <p id="mqtt-status"></p>
+    <label for="mqtt-host">Broker host</label>
+    <input id="mqtt-host" placeholder="homeassistant.local or 192.168.1.10" spellcheck="false" autocapitalize="off">
+    <p class="hint">Leave it empty to turn MQTT off. Use the hostname or IP of the machine running your MQTT broker (often the Home Assistant host).</p>
+    <div class="times">
+      <div><label for="mqtt-port">Port</label><input id="mqtt-port" type="number" inputmode="numeric" min="1" max="65535" step="1" value="1883" style="max-width: 120px"></div>
+    </div>
+    <p class="hint">1883 is the usual port. Only change it if your broker uses another.</p>
+    <label for="mqtt-user">Username (optional)</label>
+    <input id="mqtt-user" autocomplete="off" spellcheck="false" autocapitalize="off">
+    <label for="mqtt-pass">Password</label>
+    <div class="pw">
+      <input id="mqtt-pass" type="password" autocomplete="new-password" spellcheck="false" autocapitalize="off">
+      <button type="button" class="secondary mini" id="b-mqtt-show">Show</button>
+    </div>
+    <p class="hint" id="mqtt-pass-hint">Leave blank to keep a saved password. The password is never shown again after you save.</p>
+    <button type="button" id="b-mqtt">Save</button>
+    <p class="hint" id="mqtt-msg"></p>
+  </section>
+
   <section class="card" id="c-wifi">
     <h2>WiFi networks</h2>
     <p>The phone remembers up to <span id="w-max">5</span> WiFi networks and joins the strongest one it can see. Taking the phone to another home? Add that home's WiFi here first, while the phone is still on this one.</p>
@@ -362,7 +387,7 @@ footer { color: var(--muted); font-size: 14px; text-align: center; margin-top: 2
       <button type="button" id="b-hs-save">Save and restart</button>
       <p class="hint" id="hs-msg"></p>
       <h3>Factory reset</h3>
-      <p>Erases everything on the phone: the WiFi, the Twilio connection, the people on each button, their times, the call length, bedtime and the button pins (back to buttons on GPIO 4-7 and lights on 15-18). Nothing in your Twilio account is deleted.</p>
+      <p>Erases everything on the phone: the WiFi, the Twilio connection, the people on each button, their times, the call length, bedtime, Home Assistant MQTT, secret messages and the button pins (back to buttons on GPIO 4-7 and lights on 15-18). Nothing in your Twilio account is deleted.</p>
       <p>Afterwards the phone is off every saved WiFi network, so this page stops working. Set it up again from the start: plug its COM port into a computer and open the installer page.</p>
       <label for="reset-word">Type RESET to confirm</label>
       <input id="reset-word" autocomplete="off" spellcheck="false" autocapitalize="characters" style="max-width: 200px">
@@ -503,6 +528,7 @@ let resetting = false; /* factory reset sent: stop polling, the phone is going a
 let pinRows = null; /* [{button, lamp}] being edited, lamp -1 = no light */
 let pinDirty = false, pinSig = null; /* pins edited, not saved yet / what the rows were loaded from */
 let secDirty = false, secSig = null; /* secret message settings edited / what the form was loaded from */
+let mqttDirty = false, mqttSig = null;
 let secTestSeq = null; /* test email sent: the test status seq before it, until it has an outcome */
 /* Mail providers the Secret messages card fills in (host, port, security). */
 const PROVIDERS = {
@@ -859,6 +885,7 @@ function render() {
     (ap.active ? "Not connected (setup network \"" + (ap.ssid || "") + "\" is on)" : "Not connected"),
     w.connected ? "good" : "bad");
   renderWifi(w);
+  renderMqtt();
   setText("s-tw", t.provisioned ? "Ready" : "Not set up yet", t.provisioned ? "good" : "bad");
   setText("s-hs", st.handset ? "Plugged in" : "Not detected (plug it into the USB port marked OTG)", st.handset ? "good" : "bad");
   setText("s-clock", st.time_synced ? "Synced" : "Clock not synced (calls are allowed at any time until it is)", st.time_synced ? "good" : "bad");
@@ -1607,6 +1634,78 @@ $("l-secret").addEventListener("click", (ev) => {
   $("c-secret").scrollIntoView({behavior: "smooth", block: "start"});
   history.replaceState(null, "", "#c-secret");
 });
+
+/* ---------- Home Assistant MQTT ---------- */
+
+function mqttStateLine(m) {
+  if (!m || !m.enabled) return ["Off. Add a broker below to use Home Assistant.", ""];
+  switch (m.state) {
+    case "online": return ["Connected to " + m.host + (m.port ? ":" + m.port : "") + ".", "good"];
+    case "connecting": return ["Connecting to " + m.host + "…", ""];
+    case "error": return ["Could not reach " + m.host + ". Check the host, port and login.", "bad"];
+    default: return ["Broker saved (" + m.host + "). Waiting for WiFi…", ""];
+  }
+}
+
+function loadMqtt(m) {
+  $("mqtt-host").value = m.host || "";
+  $("mqtt-port").value = m.port || 1883;
+  $("mqtt-user").value = m.user || "";
+  $("mqtt-pass").value = "";
+  $("mqtt-pass").placeholder = m.has_password ? "Saved (type a new one to change it)" : "";
+  $("mqtt-pass-hint").textContent = m.has_password
+    ? "A password is saved. Leave blank to keep it, or type a new one."
+    : "Leave blank if the broker has no password. The password is never shown again after you save.";
+  mqttDirty = false;
+}
+
+function renderMqtt() {
+  const m = st.mqtt || {};
+  const sig = JSON.stringify([m.host, m.port, m.user, m.has_password, m.state, m.connected]);
+  if (sig !== mqttSig && !mqttDirty) { loadMqtt(m); mqttSig = sig; }
+  const [text, cls] = mqttStateLine(m);
+  setText("mqtt-status", text, cls);
+  setText("s-mqtt", text, cls);
+}
+
+
+async function saveMqtt() {
+  const host = $("mqtt-host").value.trim();
+  const port = Number($("mqtt-port").value);
+  if (host && (!Number.isInteger(port) || port < 1 || port > 65535)) {
+    $("mqtt-msg").textContent = "Pick a port from 1 to 65535.";
+    return false;
+  }
+  const body = {host: host, port: host ? port : 1883, user: $("mqtt-user").value.trim()};
+  const pass = $("mqtt-pass").value;
+  if (pass) body.password = pass;
+  let r;
+  try { r = await api("/api/mqtt", body); } catch (e) { r = {ok: false, j: {}}; }
+  $("mqtt-msg").textContent = r.ok ? "Saved." : (r.j.error || "Could not save. Try again.");
+  if (r.ok) { mqttDirty = false; mqttSig = null; $("mqtt-pass").value = ""; kick(); }
+  return r.ok;
+}
+
+["mqtt-host", "mqtt-port", "mqtt-user", "mqtt-pass"].forEach((id) => {
+  $(id).addEventListener("input", () => { mqttDirty = true; $("mqtt-msg").textContent = ""; });
+  $(id).addEventListener("change", () => { mqttDirty = true; });
+});
+$("b-mqtt-show").addEventListener("click", () => {
+  const p = $("mqtt-pass"), hide = p.type === "text";
+  p.type = hide ? "password" : "text";
+  $("b-mqtt-show").textContent = hide ? "Show" : "Hide";
+});
+$("b-mqtt").addEventListener("click", async () => {
+  $("b-mqtt").disabled = true;
+  await saveMqtt();
+  $("b-mqtt").disabled = false;
+});
+$("l-mqtt").addEventListener("click", (ev) => {
+  ev.preventDefault();
+  $("c-mqtt").scrollIntoView({behavior: "smooth", block: "start"});
+  history.replaceState(null, "", "#c-mqtt");
+});
+
 
 $("b-tw-cancel").addEventListener("click", () => {
   /* The edits stay in the form, unsaved. */

@@ -52,6 +52,7 @@
 #include "improv.h"
 #include "contact_leds.h"
 #include "modes.h"
+#include "mqtt_ha.h"
 #include "pins.h"
 #include "prompts.h"
 #include "rtp.h"
@@ -233,6 +234,26 @@ static void check_call_result(uint32_t *seen)
     sip_result_t r;
     sip_last_result(&r);
     atomic_store(&s_cooldown_until_ms, now_ms() + APP_PRESS_COOLDOWN_MS);
+    const char *outcome = "answered";
+    if (r.kind[0] == '\0') {
+        outcome = "answered";
+    } else if (strcmp(r.kind, "noanswer") == 0) {
+        outcome = "no-answer";
+    } else if (strcmp(r.kind, "busy") == 0) {
+        outcome = "busy";
+    } else if (strcmp(r.kind, "timeup") == 0) {
+        outcome = "timeup";
+    } else if (strcmp(r.kind, "network") == 0) {
+        outcome = "network";
+    } else if (strcmp(r.kind, "setup") == 0) {
+        outcome = "setup";
+    } else {
+        outcome = "failed";
+    }
+    cfg_contact_t c;
+    const char *name = (r.contact >= 0 && config_get_contact(r.contact, &c)) ? c.name : "";
+    const int64_t end = now_ms();
+    const int64_t start = end - (int64_t)r.talk_ms;
     prompt_id_t p = prompt_for_result(&r);
     bool busy = r.failed || strcmp(r.kind, "unreachable") == 0;
     if (p != PROMPT_NONE || busy) {
@@ -753,6 +774,10 @@ void app_main(void)
     secret_start();
     improv_start();
     setup_server_start();
+    /* After WiFi: MQTT is optional and must not block SIP/audio if the
+     * broker is down. */
+    mqtt_ha_start();
+    /* Outbound HTTPS sync to app.bell-towne.com (optional; calling works offline). */
     status_led_start();
     schedule_start();
     contact_leds_start();
