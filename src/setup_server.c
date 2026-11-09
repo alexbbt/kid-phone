@@ -211,6 +211,23 @@ static void wifi_json(cJSON *w)
     if (wifi_get_ip(ip, sizeof(ip))) {
         cJSON_AddStringToObject(w, "ip", ip);
     }
+
+    /* SoftAP recovery: never log the password; expose it only on the local
+     * setup page while the AP is up so a parent can share it with another phone. */
+    cJSON *ap = cJSON_AddObjectToObject(w, "ap");
+    const bool ap_on = wifi_ap_active();
+    cJSON_AddBoolToObject(ap, "active", ap_on);
+    cJSON_AddStringToObject(ap, "ip", APP_WIFI_AP_IP);
+    char ap_ssid[33] = "";
+    wifi_ap_ssid(ap_ssid, sizeof(ap_ssid));
+    cJSON_AddStringToObject(ap, "ssid", ap_ssid);
+    if (ap_on) {
+        char ap_pass[17];
+        if (wifi_ap_password(ap_pass, sizeof(ap_pass))) {
+            cJSON_AddStringToObject(ap, "password", ap_pass);
+            mbedtls_platform_zeroize(ap_pass, sizeof(ap_pass));
+        }
+    }
     cfg_wifi_info_t nets[CFG_MAX_WIFI];
     int n = config_wifi_list(nets, CFG_MAX_WIFI);
     cJSON_AddNumberToObject(w, "max", CFG_MAX_WIFI);
@@ -1388,6 +1405,22 @@ static esp_err_t h_wifi_add(httpd_req_t *req)
     } else if (pl != 0 && (pl < 8 || pl > 63)) {
         err = "A WiFi password has 8 to 63 characters. Leave it empty for an open network.";
     }
+    /* Offline (typically on the setup AP): try the credentials before writing
+     * NVS so a typo does not replace a working saved password. Online adds
+     * stay save-only so an active call or the current link is not disrupted. */
+    if (!err && !wifi_is_connected()) {
+        if (sip_call_state() != CALL_IDLE) {
+            mbedtls_platform_zeroize(pass, sizeof(pass));
+            return send_msg(req, "409 Conflict", false, "The phone is in a call. Try again when it has ended.");
+        }
+        ESP_LOGI(TAG, "testing WiFi credentials before saving");
+        if (!wifi_try_network(ssid, pass, APP_WIFI_ATTEMPT_MS + 5000)) {
+            mbedtls_platform_zeroize(pass, sizeof(pass));
+            return send_msg(req, "400 Bad Request", false,
+                            "Could not join that network. Check the name and password — nothing was saved.");
+        }
+    }
+
     bool updated = false;
     esp_err_t e = ESP_FAIL;
     if (!err) {
@@ -1411,7 +1444,7 @@ static esp_err_t h_wifi_add(httpd_req_t *req)
     cJSON *o = cJSON_CreateObject();
     cJSON_AddBoolToObject(o, "ok", true);
     cJSON_AddBoolToObject(o, "updated", updated);
-    cJSON_AddStringToObject(o, "message", updated ? "Password updated." : "Saved.");
+    cJSON_AddStringToObject(o, "message", updated ? "Password updated." : "Saved. The setup network will turn off in a few seconds.");
     return send_json(req, "200 OK", o);
 }
 

@@ -7,6 +7,7 @@
 
 #include "esp_event.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
@@ -72,9 +73,16 @@ typedef struct {
 } msg_t;
 
 static esp_netif_t *s_netif;
+static esp_netif_t *s_ap_netif;
 static QueueHandle_t s_q;
 static _Atomic bool s_connected;
+static _Atomic bool s_ap_active;
 static _Atomic int s_state = ST_IDLE;
+static bool s_ap_up;                 /* manager: softAP configured and mode APSTA */
+static int64_t s_fail_since_us;      /* first moment of sustained STA failure, 0 = ok/unknown */
+static int64_t s_ap_stop_us;         /* when to tear down AP after STA up, 0 = none */
+static char s_ap_ssid[33];
+static char s_ap_pass[17];
 
 /* SSID connected to, or being tried ("" otherwise). Read by other tasks. */
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
@@ -460,6 +468,98 @@ static void fill_sta_config(wifi_config_t *cfg, const char *ssid, const char *pa
 }
 
 /* ---------------------------------------------------------------------------
+ * SoftAP recovery
+ * ------------------------------------------------------------------------- */
+
+static void ap_build_creds(void)
+{
+    uint8_t mac[6] = {0};
+    if (esp_wifi_get_mac(WIFI_IF_STA, mac) != ESP_OK) {
+        esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    }
+    snprintf(s_ap_ssid, sizeof(s_ap_ssid), "%s%02x%02x%02x", APP_WIFI_AP_SSID_PREFIX, mac[3], mac[4], mac[5]);
+    /* 10 chars, WPA2: kp + 4 MAC bytes. Deterministic per board; never logged. */
+    snprintf(s_ap_pass, sizeof(s_ap_pass), "kp%02x%02x%02x%02x", mac[2], mac[3], mac[4], mac[5]);
+}
+
+static void ap_start(void)
+{
+    if (s_ap_up) {
+        return;
+    }
+    ap_build_creds();
+    wifi_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    strlcpy((char *)cfg.ap.ssid, s_ap_ssid, sizeof(cfg.ap.ssid));
+    strlcpy((char *)cfg.ap.password, s_ap_pass, sizeof(cfg.ap.password));
+    cfg.ap.ssid_len = (uint8_t)strlen(s_ap_ssid);
+    cfg.ap.channel = APP_WIFI_AP_CHANNEL;
+    cfg.ap.authmode = WIFI_AUTH_WPA2_PSK;
+    cfg.ap.max_connection = APP_WIFI_AP_MAX_CONN;
+    cfg.ap.beacon_interval = 100;
+    esp_err_t err = esp_wifi_set_mode(WIFI_MODE_APSTA);
+    if (err == ESP_OK) {
+        err = esp_wifi_set_config(WIFI_IF_AP, &cfg);
+    }
+    mbedtls_platform_zeroize(cfg.ap.password, sizeof(cfg.ap.password));
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "setup AP could not start: %s", esp_err_to_name(err));
+        return;
+    }
+    s_ap_up = true;
+    atomic_store(&s_ap_active, true);
+    s_ap_stop_us = 0;
+    ESP_LOGI(TAG, "setup AP \"%s\" up — open http://%s/ on a phone joined to that network", s_ap_ssid,
+             APP_WIFI_AP_IP);
+}
+
+static void ap_stop(void)
+{
+    if (!s_ap_up) {
+        return;
+    }
+    s_ap_stop_us = 0;
+    esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "could not leave setup AP mode: %s", esp_err_to_name(err));
+        return;
+    }
+    s_ap_up = false;
+    atomic_store(&s_ap_active, false);
+    ESP_LOGI(TAG, "setup AP stopped");
+}
+
+static void ap_note_failure(void)
+{
+    if (s_fail_since_us == 0) {
+        s_fail_since_us = now_us();
+    }
+}
+
+static void ap_note_success(void)
+{
+    s_fail_since_us = 0;
+    if (s_ap_up) {
+        s_ap_stop_us = now_us() + (int64_t)APP_WIFI_AP_STOP_DELAY_MS * 1000;
+    }
+}
+
+static void ap_maybe_open_for_recovery(void)
+{
+    if (s_ap_up) {
+        return;
+    }
+    if (s_fail_since_us == 0) {
+        return;
+    }
+    if (now_us() - s_fail_since_us < (int64_t)APP_WIFI_AP_RECOVERY_MS * 1000) {
+        return;
+    }
+    ESP_LOGW(TAG, "WiFi still down after %d s: opening setup AP for recovery", APP_WIFI_AP_RECOVERY_MS / 1000);
+    ap_start();
+}
+
+/* ---------------------------------------------------------------------------
  * Manager: steps
  * ------------------------------------------------------------------------- */
 
@@ -585,6 +685,8 @@ static void round_failed(void)
     set_state(ST_BACKOFF);
     arm(s_backoff_ms);
     s_backoff_ms = s_backoff_ms * 2 > APP_WIFI_BACKOFF_MAX_MS ? APP_WIFI_BACKOFF_MAX_MS : s_backoff_ms * 2;
+    ap_note_failure();
+    ap_maybe_open_for_recovery();
 }
 
 static void try_next(void)
@@ -606,7 +708,9 @@ static void start_round(void)
     set_cur("");
     s_nnets = config_wifi_get(s_nets, CFG_MAX_WIFI);
     if (s_nnets == 0) {
-        ESP_LOGW(TAG, "no WiFi network saved yet: set one up from the browser installer (Improv Serial)");
+        ESP_LOGW(TAG, "no WiFi network saved yet — opening setup AP (Improv Serial still works)");
+        ap_note_failure();
+        ap_start();
         set_state(ST_IDLE);
         disarm();
         return;
@@ -783,6 +887,7 @@ static void on_got_ip(void)
     s_backoff_ms = APP_WIFI_BACKOFF_MIN_MS;
     wipe_nets();
     atomic_store(&s_connected, true);
+    ap_note_success();
     hist_attempt(cur, WIFI_RES_CONNECTED, 0, s_attempt_try);
     if (s_attempt_try) {
         s_attempt_try = false;
@@ -927,6 +1032,17 @@ static void manager_task(void *arg)
         if (s_scan_deadline_us && (!wake || s_scan_deadline_us < wake)) {
             wake = s_scan_deadline_us;
         }
+        if (s_ap_stop_us && (!wake || s_ap_stop_us < wake)) {
+            wake = s_ap_stop_us;
+        }
+        /* While offline and waiting to open the recovery AP, wake when the
+         * APP_WIFI_AP_RECOVERY_MS window ends (not only on round_failed). */
+        if (!s_ap_up && s_fail_since_us && !atomic_load(&s_connected)) {
+            int64_t open_at = s_fail_since_us + (int64_t)APP_WIFI_AP_RECOVERY_MS * 1000;
+            if (!wake || open_at < wake) {
+                wake = open_at;
+            }
+        }
         TickType_t ticks = portMAX_DELAY;
         if (wake) {
             int64_t ms = (wake - now_us()) / 1000;
@@ -984,6 +1100,12 @@ static void manager_task(void *arg)
             disarm();
             on_deadline();
         }
+        if (s_ap_stop_us && now >= s_ap_stop_us) {
+            ap_stop();
+        }
+        if (!atomic_load(&s_connected)) {
+            ap_maybe_open_for_recovery();
+        }
         service_pending();
     }
 }
@@ -1037,6 +1159,12 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         ESP_LOGW(TAG, "lost IP address");
         atomic_store(&s_connected, false);
         post(M_LOST_IP, 0);
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_AP_STACONNECTED) {
+        const wifi_event_ap_staconnected_t *e = data;
+        ESP_LOGI(TAG, "setup AP client " MACSTR " joined", MAC2STR(e->mac));
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_AP_STADISCONNECTED) {
+        const wifi_event_ap_stadisconnected_t *e = data;
+        ESP_LOGI(TAG, "setup AP client " MACSTR " left", MAC2STR(e->mac));
     }
 }
 
@@ -1062,6 +1190,7 @@ void wifi_start(void)
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     s_netif = esp_netif_create_default_wifi_sta();
+    s_ap_netif = esp_netif_create_default_wifi_ap();
     esp_netif_set_hostname(s_netif, "kidphone");
 
     wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
@@ -1074,10 +1203,40 @@ void wifi_start(void)
 
     xTaskCreatePinnedToCore(manager_task, "wifi_mgr", 4608, NULL, 4, NULL, 0);
 
+    /* STA-only until ap_start() switches to APSTA for recovery. */
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_start()); /* STA_START starts the first round */
     /* Modem sleep adds up to a beacon interval of latency per packet. */
     esp_wifi_set_ps(WIFI_PS_NONE);
+    ap_build_creds();
+}
+
+bool wifi_ap_active(void)
+{
+    return atomic_load(&s_ap_active);
+}
+
+void wifi_ap_ssid(char *buf, size_t len)
+{
+    if (!buf || len == 0) {
+        return;
+    }
+    if (s_ap_ssid[0] == '\0') {
+        ap_build_creds();
+    }
+    strlcpy(buf, s_ap_ssid, len);
+}
+
+bool wifi_ap_password(char *buf, size_t len)
+{
+    if (!buf || len < 11) {
+        return false;
+    }
+    if (s_ap_pass[0] == '\0') {
+        ap_build_creds();
+    }
+    strlcpy(buf, s_ap_pass, len);
+    return true;
 }
 
 bool wifi_is_connected(void)
