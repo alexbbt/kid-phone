@@ -14,8 +14,11 @@
  *   - a working connection is kept: no roaming to a stronger saved network,
  *     switching only happens after a disconnect (or when the connected network
  *     is removed from the list).
- * With no saved network the radio is started but stays idle until Improv
- * saves one. Power save is off to keep RTP latency low.
+ * With no saved network (or after APP_WIFI_AP_RECOVERY_MS of failed joins)
+ * a password-protected softAP is opened in AP+STA mode so a parent can open
+ * the setup page at http://192.168.4.1/ and repair WiFi without USB. The AP
+ * is torn down a few seconds after a stable station IP. Power save is off to
+ * keep RTP latency low.
  */
 #pragma once
 
@@ -60,6 +63,18 @@ bool wifi_try_network(const char *ssid, const char *pass, int timeout_ms);
  * is offline; if the network it is on was removed, it leaves it (after a
  * short delay so an HTTP reply can get out) and joins the best other one. */
 void wifi_networks_changed(void);
+
+/* SoftAP recovery (AP+STA). True while the setup AP is up. SSID is
+ * kidphone-<mac>; password is derived from the STA MAC (see
+ * wifi_ap_password) and is never logged. IP is APP_WIFI_AP_IP. */
+bool wifi_ap_active(void);
+
+/* Copy the setup AP SSID (empty if never built). Always succeeds. */
+void wifi_ap_ssid(char *buf, size_t len);
+
+/* Copy the setup AP WPA2 password into buf. Returns false if buf is too
+ * small (< 11 bytes). Same derivation every boot for this board. */
+bool wifi_ap_password(char *buf, size_t len);
 
 /* ---- Connection history (RAM only, cleared at boot) ---- */
 

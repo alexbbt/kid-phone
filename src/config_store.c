@@ -22,6 +22,7 @@ static const char *TAG = "config";
 static const char *NS = "kidphone";
 
 static app_cfg_t s_cfg;
+static cfg_cloud_t s_cloud;
 static SemaphoreHandle_t s_lock;
 static uint32_t s_gen;
 
@@ -220,6 +221,31 @@ static void secret_defaults(cfg_secret_t *s)
     s->cap_hr = APP_SECRET_CAP_DEFAULT;
 }
 
+static void mqtt_defaults(cfg_mqtt_t *m)
+{
+    memset(m, 0, sizeof(*m));
+    m->port = 1883;
+}
+
+static void cloud_defaults(cfg_cloud_t *c)
+{
+    memset(c, 0, sizeof(*c));
+    strlcpy(c->base_url, APP_CLOUD_BASE_URL_DEFAULT, sizeof(c->base_url));
+}
+
+static void load_cloud(nvs_handle_t h, cfg_cloud_t *c)
+{
+    cloud_defaults(c);
+    get_str(h, "cloud_url", c->base_url, sizeof(c->base_url));
+    if (!c->base_url[0]) {
+        strlcpy(c->base_url, APP_CLOUD_BASE_URL_DEFAULT, sizeof(c->base_url));
+    }
+    get_str(h, "cloud_uuid", c->device_uuid, sizeof(c->device_uuid));
+    get_str(h, "cloud_atok", c->access_token, sizeof(c->access_token));
+    get_str(h, "cloud_rtok", c->refresh_token, sizeof(c->refresh_token));
+    get_str(h, "cloud_code", c->pair_code, sizeof(c->pair_code));
+}
+
 /* Secret settings: every key optional (firmware before 0.6.0 wrote none). */
 static void load_secret(nvs_handle_t h, cfg_secret_t *s)
 {
@@ -248,6 +274,19 @@ static void load_secret(nvs_handle_t h, cfg_secret_t *s)
     s->bed_ok = v8 == 1;
 }
 
+/* MQTT broker: every key optional (firmware before Home Assistant support). */
+static void load_mqtt(nvs_handle_t h, cfg_mqtt_t *m)
+{
+    mqtt_defaults(m);
+    get_str(h, "mqtt_host", m->host, sizeof(m->host));
+    uint16_t v16 = 0;
+    if (nvs_get_u16(h, "mqtt_port", &v16) == ESP_OK && v16) {
+        m->port = v16;
+    }
+    get_str(h, "mqtt_user", m->user, sizeof(m->user));
+    get_str(h, "mqtt_pass", m->pass, sizeof(m->pass));
+}
+
 static void load(void)
 {
     memset(&s_cfg, 0, sizeof(s_cfg));
@@ -258,6 +297,8 @@ static void load(void)
     s_cfg.bedtime.end_min = APP_BEDTIME_END_DEFAULT;
     pins_defaults(&s_cfg.pins);
     secret_defaults(&s_cfg.secret);
+    mqtt_defaults(&s_cfg.mqtt);
+    cloud_defaults(&s_cloud);
     nvs_handle_t h;
     if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) {
         return; /* namespace does not exist yet: empty config */
@@ -325,6 +366,8 @@ static void load(void)
     get_str(h, "home_tz_name", s_cfg.bedtime.tz_name, sizeof(s_cfg.bedtime.tz_name));
     load_pins(h, &s_cfg.pins);
     load_secret(h, &s_cfg.secret);
+    load_mqtt(h, &s_cfg.mqtt);
+    load_cloud(h, &s_cloud);
     /* Missing (every phone before 0.7.0) or unknown = English. */
     uint8_t lang = PROMPT_LANG_EN;
     if (nvs_get_u8(h, "lang", &lang) == ESP_OK && lang < PROMPT_LANG_COUNT) {
@@ -1119,12 +1162,200 @@ uint8_t config_slot_secret(int idx, char *email, size_t len)
     return m;
 }
 
+void config_get_mqtt(cfg_mqtt_t *out)
+{
+    lock();
+    *out = s_cfg.mqtt;
+    unlock();
+}
+
+bool config_mqtt_enabled(void)
+{
+    lock();
+    bool on = s_cfg.mqtt.host[0] != '\0';
+    unlock();
+    return on;
+}
+
+esp_err_t config_set_mqtt(const cfg_mqtt_t *in, bool keep_pass)
+{
+    if (in->host[0] && !in->port) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    cfg_mqtt_t nm = *in;
+    if (!nm.host[0]) {
+        /* Off: erase every MQTT key so a factory-like clear of this feature
+         * does not leave a stale password behind. */
+        memset(&nm, 0, sizeof(nm));
+        nm.port = 1883;
+    } else if (!nm.port) {
+        nm.port = 1883;
+    }
+    lock();
+    if (keep_pass && nm.host[0]) {
+        memcpy(nm.pass, s_cfg.mqtt.pass, sizeof(nm.pass));
+    }
+    err |= put_str(h, "mqtt_host", nm.host);
+    if (nm.host[0]) {
+        err |= nvs_set_u16(h, "mqtt_port", nm.port);
+        err |= put_str(h, "mqtt_user", nm.user);
+        err |= put_str(h, "mqtt_pass", nm.pass);
+    } else {
+        err |= erase_key(h, "mqtt_port");
+        err |= erase_key(h, "mqtt_user");
+        err |= erase_key(h, "mqtt_pass");
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    if (err == ESP_OK) {
+        s_cfg.mqtt = nm;
+    }
+    s_gen++;
+    unlock();
+    nvs_close(h);
+    mbedtls_platform_zeroize(&nm, sizeof(nm));
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "saving MQTT settings failed: %s", esp_err_to_name(err));
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
 bool config_has_twilio_key(void)
 {
     lock();
     bool r = s_cfg.key_sid[0] && s_cfg.key_secret[0] && s_cfg.svc_sid[0] && s_cfg.env_sid[0];
     unlock();
     return r;
+}
+
+void config_get_cloud(cfg_cloud_t *out)
+{
+    lock();
+    *out = s_cloud;
+    unlock();
+}
+
+bool config_cloud_paired(void)
+{
+    lock();
+    bool ok = s_cloud.device_uuid[0] && s_cloud.refresh_token[0];
+    unlock();
+    return ok;
+}
+
+esp_err_t config_set_cloud_url(const char *url)
+{
+    if (!url || !url[0] || strlen(url) >= sizeof(s_cloud.base_url)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (strncmp(url, "https://", 8) != 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = put_str(h, "cloud_url", url);
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    if (err == ESP_OK) {
+        lock();
+        strlcpy(s_cloud.base_url, url, sizeof(s_cloud.base_url));
+        s_gen++;
+        unlock();
+    }
+    nvs_close(h);
+    return err == ESP_OK ? ESP_OK : ESP_FAIL;
+}
+
+esp_err_t config_set_cloud_pairing_code(const char *code)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    lock();
+    if (code && code[0]) {
+        strlcpy(s_cloud.pair_code, code, sizeof(s_cloud.pair_code));
+        err = put_str(h, "cloud_code", s_cloud.pair_code);
+    } else {
+        s_cloud.pair_code[0] = '\0';
+        err = erase_key(h, "cloud_code");
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    s_gen++;
+    unlock();
+    nvs_close(h);
+    return err == ESP_OK ? ESP_OK : ESP_FAIL;
+}
+
+esp_err_t config_set_cloud_tokens(const char *device_uuid, const char *access, const char *refresh)
+{
+    if (!device_uuid || !device_uuid[0] || !access || !access[0] || !refresh || !refresh[0]) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (strlen(device_uuid) >= sizeof(s_cloud.device_uuid) || strlen(access) >= sizeof(s_cloud.access_token) ||
+        strlen(refresh) >= sizeof(s_cloud.refresh_token)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    lock();
+    strlcpy(s_cloud.device_uuid, device_uuid, sizeof(s_cloud.device_uuid));
+    strlcpy(s_cloud.access_token, access, sizeof(s_cloud.access_token));
+    strlcpy(s_cloud.refresh_token, refresh, sizeof(s_cloud.refresh_token));
+    s_cloud.pair_code[0] = '\0';
+    err |= put_str(h, "cloud_uuid", s_cloud.device_uuid);
+    err |= put_str(h, "cloud_atok", s_cloud.access_token);
+    err |= put_str(h, "cloud_rtok", s_cloud.refresh_token);
+    err |= erase_key(h, "cloud_code");
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    s_gen++;
+    unlock();
+    nvs_close(h);
+    return err == ESP_OK ? ESP_OK : ESP_FAIL;
+}
+
+esp_err_t config_clear_cloud(void)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    lock();
+    mbedtls_platform_zeroize(s_cloud.access_token, sizeof(s_cloud.access_token));
+    mbedtls_platform_zeroize(s_cloud.refresh_token, sizeof(s_cloud.refresh_token));
+    s_cloud.device_uuid[0] = '\0';
+    s_cloud.pair_code[0] = '\0';
+    err |= erase_key(h, "cloud_uuid");
+    err |= erase_key(h, "cloud_atok");
+    err |= erase_key(h, "cloud_rtok");
+    err |= erase_key(h, "cloud_code");
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    s_gen++;
+    unlock();
+    nvs_close(h);
+    return err == ESP_OK ? ESP_OK : ESP_FAIL;
 }
 
 esp_err_t config_factory_reset(void)
@@ -1141,12 +1372,15 @@ esp_err_t config_factory_reset(void)
     lock();
     mbedtls_platform_zeroize(&s_cfg, sizeof(s_cfg));
     mbedtls_platform_zeroize(s_wifi, sizeof(s_wifi));
+    mbedtls_platform_zeroize(&s_cloud, sizeof(s_cloud));
+    cloud_defaults(&s_cloud);
     s_nwifi = 0;
     s_cfg.max_call_min = APP_CALL_MAX_MIN_DEFAULT;
     s_cfg.bedtime.start_min = APP_BEDTIME_START_DEFAULT;
     s_cfg.bedtime.end_min = APP_BEDTIME_END_DEFAULT;
     pins_defaults(&s_cfg.pins);
     secret_defaults(&s_cfg.secret);
+    mqtt_defaults(&s_cfg.mqtt);
     s_gen++;
     unlock();
     ESP_LOGW(TAG, "factory reset: config erased (%s)", esp_err_to_name(err));

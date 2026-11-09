@@ -181,6 +181,18 @@
 #define APP_WIFI_BACKOFF_MAX_MS 60000
 #define APP_WIFI_ATTEMPT_MS     20000
 #define APP_WIFI_SCAN_TIMEOUT_MS 10000
+/* SoftAP recovery (AP+STA): after this long without a station IP while
+ * saved networks exist, open a setup AP so a parent can repair WiFi from a
+ * phone browser. With no saved network the AP opens immediately. */
+#define APP_WIFI_AP_RECOVERY_MS 90000
+#define APP_WIFI_AP_SSID_PREFIX "kidphone-"
+#define APP_WIFI_AP_CHANNEL     1
+#define APP_WIFI_AP_MAX_CONN    4
+/* SoftAP IPv4 (esp_netif default softAP). Documented for recovery. */
+#define APP_WIFI_AP_IP          "192.168.4.1"
+/* Hold the AP this long after STA gets an IP so an HTTP "Saved" reply can
+ * finish on the AP client before the radio drops it. */
+#define APP_WIFI_AP_STOP_DELAY_MS 3000
 
 /* A call whose WiFi is gone this long, or that finds the phone on a new IP
  * address (another network), is ended locally: its SIP and media addresses
@@ -273,6 +285,15 @@
  * twilio_provision.c). */
 #define APP_PROV_HTTP_TRIES     4
 #define APP_PROV_RETRY_MS       1000
+
+/* Bell-Towne cloud sync (outbound HTTPS only). TLS uses the ESP-IDF cert
+ * bundle; never skip validation. Calling works if the app is unreachable. */
+#define APP_CLOUD_BASE_URL_DEFAULT "https://app.bell-towne.com"
+#define APP_CLOUD_SYNC_STACK    12288
+#define APP_CLOUD_SYNC_MS       30000
+#define APP_CLOUD_HTTP_TIMEOUT_MS 20000
+#define APP_CLOUD_LOG_CAPACITY  24
+#define APP_CLOUD_PAIR_POLL_MS  3000
 /* Largest Twilio API response accepted (list pages land in PSRAM). */
 #define APP_PROV_MAX_RESP       (256 * 1024)
 #define APP_PROV_BUILD_TIMEOUT_MS 120000

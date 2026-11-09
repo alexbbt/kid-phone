@@ -18,3 +18,9 @@ CONFIG_LWIP_MAX_SOCKETS=16
 CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
 CONFIG_LWIP_SNTP_MAX_SERVERS=2
+# MQTT for Home Assistant discovery (plain mqtt://; TLS optional via component).
+# Keep buffers modest in firmware (mqtt_ha.c); skip websocket transports to
+# save flash — home brokers are almost always TCP 1883/8883.
+CONFIG_MQTT_PROTOCOL_311=y
+# CONFIG_MQTT_TRANSPORT_WEBSOCKET is not set
+# CONFIG_MQTT_TRANSPORT_WEBSOCKET_SECURE is not set

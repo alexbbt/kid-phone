@@ -1,0 +1,168 @@
+# Kid Phone — Home Assistant Lovelace dashboard
+#
+# After MQTT discovery, entities appear under device "Kid Phone".
+# Entity ids below match the default HA slug of the discovery names
+# (device "Kid Phone" + entity name). If yours differ, rename them in
+# Settings → Devices → Kid Phone, or edit the entity_id lines here.
+#
+# Schedule windows use plain text, not raw JSON:
+#   YNYYYYN 17:00-20:00
+# Seven chars Sun→Sat (Y=on), then start-end. Empty clears the window.
+# See docs/mqtt.md.
+#
+# Paste into a new dashboard (raw YAML) or include as a view.
+
+title: Kid Phone
+views:
+  - title: Phone
+    path: kid-phone
+    cards:
+      - type: entities
+        title: Status
+        entities:
+          - entity: sensor.kid_phone_call_state
+            name: Call
+          - entity: sensor.kid_phone_last_error
+            name: Last error
+          - entity: sensor.kid_phone_wifi_signal
+            name: WiFi
+          - entity: sensor.kid_phone_firmware
+            name: Firmware
+          - entity: button.kid_phone_hang_up
+            name: Hang up
+
+      - type: entities
+        title: Call length & bedtime
+        entities:
+          - entity: number.kid_phone_max_call_length
+            name: Longest call (minutes)
+          - entity: switch.kid_phone_bedtime
+            name: Bedtime on
+          - entity: text.kid_phone_bedtime_starts
+            name: Lights off at
+          - entity: text.kid_phone_bedtime_ends
+            name: Lights on at
+          - entity: text.kid_phone_home_time_zone_name
+            name: Home time zone (name)
+          - entity: text.kid_phone_home_time_zone
+            name: Home time zone (POSIX)
+
+      - type: entities
+        title: Contact 1
+        entities:
+          - entity: text.kid_phone_contact_1_name
+            name: Name
+          - entity: text.kid_phone_contact_1_number
+            name: Number
+          - entity: switch.kid_phone_contact_1_schedule
+            name: Schedule on
+          - entity: text.kid_phone_contact_1_time_zone_name
+            name: Their time zone (name)
+          - entity: text.kid_phone_contact_1_time_zone
+            name: Their time zone (POSIX)
+          - entity: text.kid_phone_contact_1_window_1
+            name: Window 1
+          - entity: text.kid_phone_contact_1_window_2
+            name: Window 2
+          - entity: text.kid_phone_contact_1_window_3
+            name: Window 3
+          - entity: text.kid_phone_contact_1_window_4
+            name: Window 4
+
+      - type: markdown
+        content: |
+          **Window format:** `YNYYYYN 17:00-20:00`  
+          Letters are Sun→Sat (`Y` = that day). Example weekdays 5–8 pm:
+          `NYYYYYN 17:00-20:00`. Clear a window by saving an empty value.
+
+          Number changes update Twilio’s allow-list the same way as the
+          phone’s setup page. Hang up is never retained (no replay after a
+          broker restart).
+
+      - type: entities
+        title: Contact 2
+        entities:
+          - entity: text.kid_phone_contact_2_name
+            name: Name
+          - entity: text.kid_phone_contact_2_number
+            name: Number
+          - entity: switch.kid_phone_contact_2_schedule
+            name: Schedule on
+          - entity: text.kid_phone_contact_2_time_zone_name
+            name: Their time zone (name)
+          - entity: text.kid_phone_contact_2_time_zone
+            name: Their time zone (POSIX)
+          - entity: text.kid_phone_contact_2_window_1
+            name: Window 1
+          - entity: text.kid_phone_contact_2_window_2
+            name: Window 2
+          - entity: text.kid_phone_contact_2_window_3
+            name: Window 3
+          - entity: text.kid_phone_contact_2_window_4
+            name: Window 4
+
+      - type: entities
+        title: Contact 3
+        entities:
+          - entity: text.kid_phone_contact_3_name
+            name: Name
+          - entity: text.kid_phone_contact_3_number
+            name: Number
+          - entity: switch.kid_phone_contact_3_schedule
+            name: Schedule on
+          - entity: text.kid_phone_contact_3_time_zone_name
+            name: Their time zone (name)
+          - entity: text.kid_phone_contact_3_time_zone
+            name: Their time zone (POSIX)
+          - entity: text.kid_phone_contact_3_window_1
+            name: Window 1
+          - entity: text.kid_phone_contact_3_window_2
+            name: Window 2
+          - entity: text.kid_phone_contact_3_window_3
+            name: Window 3
+          - entity: text.kid_phone_contact_3_window_4
+            name: Window 4
+
+      - type: entities
+        title: Contact 4
+        entities:
+          - entity: text.kid_phone_contact_4_name
+            name: Name
+          - entity: text.kid_phone_contact_4_number
+            name: Number
+          - entity: switch.kid_phone_contact_4_schedule
+            name: Schedule on
+          - entity: text.kid_phone_contact_4_time_zone_name
+            name: Their time zone (name)
+          - entity: text.kid_phone_contact_4_time_zone
+            name: Their time zone (POSIX)
+          - entity: text.kid_phone_contact_4_window_1
+            name: Window 1
+          - entity: text.kid_phone_contact_4_window_2
+            name: Window 2
+          - entity: text.kid_phone_contact_4_window_3
+            name: Window 3
+          - entity: text.kid_phone_contact_4_window_4
+            name: Window 4
+
+      - type: entities
+        title: Contact 5
+        entities:
+          - entity: text.kid_phone_contact_5_name
+            name: Name
+          - entity: text.kid_phone_contact_5_number
+            name: Number
+          - entity: switch.kid_phone_contact_5_schedule
+            name: Schedule on
+          - entity: text.kid_phone_contact_5_time_zone_name
+            name: Their time zone (name)
+          - entity: text.kid_phone_contact_5_time_zone
+            name: Their time zone (POSIX)
+          - entity: text.kid_phone_contact_5_window_1
+            name: Window 1
+          - entity: text.kid_phone_contact_5_window_2
+            name: Window 2
+          - entity: text.kid_phone_contact_5_window_3
+            name: Window 3
+          - entity: text.kid_phone_contact_5_window_4
+            name: Window 4

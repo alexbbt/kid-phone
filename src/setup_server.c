@@ -17,8 +17,11 @@
 
 #include "app_config.h"
 #include "audio_engine.h"
+#include "cfg_edit.h"
+#include "cloud_sync.h"
 #include "config_store.h"
 #include "modes.h"
+#include "mqtt_ha.h"
 #include "pins.h"
 #include "prompts.h"
 #include "schedule.h"
@@ -211,6 +214,22 @@ static void wifi_json(cJSON *w)
     if (wifi_get_ip(ip, sizeof(ip))) {
         cJSON_AddStringToObject(w, "ip", ip);
     }
+    /* SoftAP recovery: never log the password; expose it only on the local
+     * setup page while the AP is up so a parent can share it with another phone. */
+    cJSON *ap = cJSON_AddObjectToObject(w, "ap");
+    const bool ap_on = wifi_ap_active();
+    cJSON_AddBoolToObject(ap, "active", ap_on);
+    cJSON_AddStringToObject(ap, "ip", APP_WIFI_AP_IP);
+    char ap_ssid[33] = "";
+    wifi_ap_ssid(ap_ssid, sizeof(ap_ssid));
+    cJSON_AddStringToObject(ap, "ssid", ap_ssid);
+    if (ap_on) {
+        char ap_pass[17];
+        if (wifi_ap_password(ap_pass, sizeof(ap_pass))) {
+            cJSON_AddStringToObject(ap, "password", ap_pass);
+            mbedtls_platform_zeroize(ap_pass, sizeof(ap_pass));
+        }
+    }
     cfg_wifi_info_t nets[CFG_MAX_WIFI];
     int n = config_wifi_list(nets, CFG_MAX_WIFI);
     cJSON_AddNumberToObject(w, "max", CFG_MAX_WIFI);
@@ -374,6 +393,25 @@ static esp_err_t h_status(httpd_req_t *req)
     bedtime_json(cJSON_AddObjectToObject(o, "bedtime"), &c->bedtime);
     pins_json(cJSON_AddObjectToObject(o, "pins"), &c->pins);
     secret_json(cJSON_AddObjectToObject(o, "secret"), &c->secret);
+    /* MQTT broker for Home Assistant (never the password). */
+    cJSON *mq = cJSON_AddObjectToObject(o, "mqtt");
+    cJSON_AddBoolToObject(mq, "enabled", c->mqtt.host[0] != '\0');
+    cJSON_AddStringToObject(mq, "host", c->mqtt.host);
+    cJSON_AddNumberToObject(mq, "port", c->mqtt.port ? c->mqtt.port : 1883);
+    cJSON_AddStringToObject(mq, "user", c->mqtt.user);
+    cJSON_AddBoolToObject(mq, "has_password", c->mqtt.pass[0] != '\0');
+    cJSON_AddStringToObject(mq, "state", mqtt_ha_state_name());
+    cJSON_AddBoolToObject(mq, "connected", mqtt_ha_connected());
+    /* Bell-Towne cloud: paired state and pairing code only — never tokens. */
+    cloud_sync_status_t cs;
+    cloud_sync_status(&cs);
+    cJSON *cloud = cJSON_AddObjectToObject(o, "cloud");
+    cJSON_AddBoolToObject(cloud, "paired", cs.paired);
+    cJSON_AddBoolToObject(cloud, "pairing", cs.pairing);
+    cJSON_AddStringToObject(cloud, "pair_code", cs.pair_code);
+    cJSON_AddStringToObject(cloud, "device_uuid", cs.device_uuid);
+    cJSON_AddStringToObject(cloud, "base_url", cs.base_url);
+    cJSON_AddStringToObject(cloud, "last_error", cs.last_error);
     config_wipe(c);
     free(c);
     cJSON_AddBoolToObject(o, "time_synced", schedule_time_synced());
@@ -400,34 +438,6 @@ static esp_err_t h_status(httpd_req_t *req)
 
     cJSON_AddItemToObject(o, "setup", setup);
     return send_json(req, "200 OK", o);
-}
-
-/* Keep digits; "00" international prefix becomes "+". E.164: + and 8..15 digits. */
-static bool normalize_number(const char *in, char *out, size_t len)
-{
-    size_t n = 0;
-    const char *p = in;
-    while (*p == ' ') {
-        p++;
-    }
-    if (p[0] == '0' && p[1] == '0') {
-        p += 2;
-    } else if (*p == '+') {
-        p++;
-    } else {
-        return false; /* national format: ask for the country code */
-    }
-    out[n++] = '+';
-    for (; *p && n + 1 < len; p++) {
-        if (isdigit((unsigned char)*p)) {
-            out[n++] = *p;
-        } else if (!strchr(" -.()/", *p)) {
-            return false;
-        }
-    }
-    out[n] = '\0';
-    size_t digits = n - 1;
-    return digits >= 8 && digits <= 15 && out[1] != '0';
 }
 
 static void trim_copy(const char *in, char *out, size_t len)
@@ -475,147 +485,6 @@ static bool email_ok(const char *e)
     for (const char *p = e; *p; p++) {
         if ((unsigned char)*p <= ' ' || (unsigned char)*p >= 0x7f || strchr("<>()[]\\,;:\"", *p)) {
             return false;
-        }
-    }
-    return true;
-}
-
-/*
- * contacts: [{name, number, schedule: {enabled, tz, tz_name, windows: [{days,
- * start, end}]}, secret, email}, ...], up to CFG_MAX_CONTACTS slots in button
- * order. Slots not given, or with an empty number and secret "off", are
- * unused; a number or a secret mode on a slot with no button pin (pins.h) is
- * refused. secret: "off" (or missing), "hold" (long press records, needs a
- * number) or "dedicated" (no number); either needs an email. Returns NULL if
- * fine, else a message for the parent.
- */
-static const char *parse_contacts(const cJSON *arr, cfg_contact_t *out, char *err, size_t err_len)
-{
-    memset(out, 0, sizeof(cfg_contact_t) * CFG_MAX_CONTACTS);
-    if (!cJSON_IsArray(arr) || cJSON_GetArraySize(arr) > CFG_MAX_CONTACTS) {
-        return "Bad contact list.";
-    }
-    cfg_pins_t pins;
-    config_get_pins(&pins);
-    const int nbuttons = pins.count;
-    int i = 0;
-    const cJSON *it;
-    cJSON_ArrayForEach(it, arr) {
-        cfg_contact_t *ct = &out[i];
-        const char *num = json_str(it, "number");
-        trim_copy(json_str(it, "name"), ct->name, sizeof(ct->name));
-        char trimmed[32];
-        trim_copy(num, trimmed, sizeof(trimmed));
-        if (trimmed[0] && !normalize_number(trimmed, ct->number, sizeof(ct->number))) {
-            snprintf(err, err_len,
-                     "Button %d: write the phone number in international format, starting with + and the country "
-                     "code, like +1 555 123 4567.", i + 1);
-            return err;
-        }
-        if (ct->number[0] && i >= nbuttons) {
-            snprintf(err, err_len,
-                     "Button %d has no pin on the phone. Add it under Buttons and lights first, or leave it empty.",
-                     i + 1);
-            return err;
-        }
-        const char *mode = json_str(it, "secret");
-        if (!mode[0] || strcmp(mode, "off") == 0) {
-            ct->secret = CFG_SECRET_OFF;
-        } else if (strcmp(mode, "hold") == 0) {
-            ct->secret = CFG_SECRET_HOLD;
-        } else if (strcmp(mode, "dedicated") == 0) {
-            ct->secret = CFG_SECRET_DEDICATED;
-        } else {
-            snprintf(err, err_len, "Button %d: unknown secret message setting.", i + 1);
-            return err;
-        }
-        if (ct->secret != CFG_SECRET_OFF) {
-            char em[128]; /* longer than ct->email, so a long address is refused, not cut */
-            trim_copy(json_str(it, "email"), em, sizeof(em));
-            if (!email_ok(em)) {
-                snprintf(err, err_len, "Button %d: %s", i + 1,
-                         em[0] ? "that email address doesn't look right."
-                               : "add the email address the secret messages go to.");
-                return err;
-            }
-            strlcpy(ct->email, em, sizeof(ct->email));
-            if (i >= nbuttons) {
-                snprintf(err, err_len,
-                         "Button %d has no pin on the phone. Add it under Buttons and lights first, or turn its "
-                         "secret messages off.", i + 1);
-                return err;
-            }
-        }
-        if (ct->secret == CFG_SECRET_HOLD && !ct->number[0]) {
-            snprintf(err, err_len,
-                     "Button %d: with Long press, a short press still calls, so it needs a phone number. Pick "
-                     "Secret button only for a button that never calls.", i + 1);
-            return err;
-        }
-        if (ct->secret == CFG_SECRET_DEDICATED && ct->number[0]) {
-            snprintf(err, err_len,
-                     "Button %d is a secret button only, so it doesn't call anyone. Clear its phone number, or "
-                     "pick Long press.", i + 1);
-            return err;
-        }
-        if (ct->number[0] && !ct->name[0]) {
-            snprintf(ct->name, sizeof(ct->name), "Contact %d", i + 1);
-        }
-        const cJSON *js = cJSON_GetObjectItem(it, "schedule");
-        cfg_schedule_t *sc = &ct->sched;
-        if (cJSON_IsObject(js)) {
-            sc->enabled = cJSON_IsTrue(cJSON_GetObjectItem(js, "enabled"));
-            strlcpy(sc->tz, json_str(js, "tz"), sizeof(sc->tz));
-            strlcpy(sc->tz_name, json_str(js, "tz_name"), sizeof(sc->tz_name));
-            const cJSON *wins = cJSON_GetObjectItem(js, "windows");
-            const cJSON *w;
-            cJSON_ArrayForEach(w, wins) {
-                if (sc->nwin == CFG_MAX_WINDOWS) {
-                    break;
-                }
-                const cJSON *d = cJSON_GetObjectItem(w, "days");
-                int start = json_minutes(cJSON_GetObjectItem(w, "start"));
-                int end = json_minutes(cJSON_GetObjectItem(w, "end"));
-                if (!cJSON_IsNumber(d) || start < 0 || start >= 1440 || end < 0 || end >= 1440) {
-                    snprintf(err, err_len, "Button %d: a time is not valid.", i + 1);
-                    return err;
-                }
-                sc->win[sc->nwin++] = (cfg_window_t){
-                    .days = (uint8_t)(d->valueint & 0x7f), .start_min = (uint16_t)start, .end_min = (uint16_t)end};
-            }
-        }
-        const char *why = ct->number[0] ? schedule_validate(sc) : NULL;
-        if (why) {
-            snprintf(err, err_len, "%s: %s.", ct->name, why);
-            return err;
-        }
-        if (!ct->number[0]) {
-            memset(sc, 0, sizeof(*sc)); /* nobody to call: no hours to keep */
-        }
-        i++;
-    }
-    if (!config_any_contact(out) && !config_any_dedicated(out)) {
-        return "Add at least one person to call, with their phone number, or a secret button.";
-    }
-    return NULL;
-}
-
-/* Same set of numbers (order and duplicates ignored)? */
-static bool same_numbers(const cfg_contact_t *a, const cfg_contact_t *b)
-{
-    for (int pass = 0; pass < 2; pass++) {
-        const cfg_contact_t *x = pass ? b : a, *y = pass ? a : b;
-        for (int i = 0; i < CFG_MAX_CONTACTS; i++) {
-            if (!x[i].number[0]) {
-                continue;
-            }
-            bool found = false;
-            for (int j = 0; j < CFG_MAX_CONTACTS && !found; j++) {
-                found = strcmp(x[i].number, y[j].number) == 0;
-            }
-            if (!found) {
-                return false;
-            }
         }
     }
     return true;
@@ -672,10 +541,10 @@ static esp_err_t h_provision(httpd_req_t *req)
     const char *err = NULL;
     const cJSON *arr = cJSON_GetObjectItem(j, "contacts");
     if (arr) {
-        err = parse_contacts(arr, ct, errbuf, sizeof(errbuf));
+        err = cfg_edit_parse_contacts(arr, ct, errbuf, sizeof(errbuf));
     } else {
         trim_copy(json_str(j, "contact_name"), ct[0].name, sizeof(ct[0].name));
-        if (!normalize_number(json_str(j, "contact_number"), ct[0].number, sizeof(ct[0].number))) {
+        if (!cfg_edit_normalize_number(json_str(j, "contact_number"), ct[0].number, sizeof(ct[0].number))) {
             err = "Write the phone number in international format, starting with + and the country code, "
                   "like +1 555 123 4567.";
         } else if (!ct[0].name[0]) {
@@ -754,72 +623,51 @@ static esp_err_t h_contacts(httpd_req_t *req)
     if (!j) {
         return send_msg(req, "400 Bad Request", false, "Missing, too large or bad request.");
     }
-    /* Contacts and config are several KB each: heap, not the server stack. */
+    /* Contacts are several KB: heap, not the server stack. */
     cfg_contact_t *ct = calloc(CFG_MAX_CONTACTS, sizeof(cfg_contact_t));
-    app_cfg_t *c = malloc(sizeof(app_cfg_t));
-    if (!ct || !c) {
-        free(ct);
-        free(c);
+    if (!ct) {
         cJSON_Delete(j);
         return send_msg(req, "503 Service Unavailable", false, "The phone is busy. Try again.");
     }
     char errbuf[200];
-    const char *err = parse_contacts(cJSON_GetObjectItem(j, "contacts"), ct, errbuf, sizeof(errbuf));
+    const char *err = cfg_edit_parse_contacts(cJSON_GetObjectItem(j, "contacts"), ct, errbuf, sizeof(errbuf));
     cJSON_Delete(j);
     if (err) {
         free(ct);
-        free(c);
         return send_msg(req, "400 Bad Request", false, err);
     }
-    config_get(c);
-    bool provisioned = c->provisioned;
-    bool same = same_numbers(ct, c->contacts);
-    config_wipe(c);
-    free(c);
-    /* Once connected, Twilio setup always keeps at least one number. */
-    if (provisioned && !config_any_contact(ct)) {
-        free(ct);
-        return send_msg(req, "400 Bad Request", false,
-                        "Keep at least one person to call while the phone is connected to Twilio.");
-    }
-    if (provisioned && !same && config_has_twilio_key()) {
-        bool started = wifi_is_connected() && twilio_provision_start_with_key(ct);
-        free(ct);
-        if (!wifi_is_connected()) {
-            return send_msg(req, "409 Conflict", false, "The phone is not on WiFi.");
-        }
-        if (!started) {
-            return send_msg(req, "409 Conflict", false, "The update could not start. Try again.");
-        }
+    uint32_t run = 0;
+    cfg_edit_result_t r = cfg_edit_save_contacts(ct, &run, errbuf, sizeof(errbuf));
+    free(ct);
+    switch (r) {
+    case CFG_EDIT_OK:
+        ESP_LOGI(TAG, "contacts and schedules saved from the web page");
+        return send_msg(req, "200 OK", true, "Saved.");
+    case CFG_EDIT_UPDATING:
         ESP_LOGI(TAG, "number update with the stored key started from the web page");
-        cJSON *o = cJSON_CreateObject();
-        cJSON_AddBoolToObject(o, "ok", true);
-        cJSON_AddBoolToObject(o, "updating", true);
-        cJSON_AddNumberToObject(o, "run", twilio_provision_run_id());
-        cJSON_AddStringToObject(o, "message", "Telling Twilio about the new numbers...");
-        return send_json(req, "202 Accepted", o);
-    }
-    /* Not connected to Twilio and no numbers at all (secret buttons only):
-     * nothing for Twilio to allow, save right away. */
-    const bool secrets_only = !provisioned && !config_any_contact(ct);
-    if (!secrets_only && (!provisioned || !same)) {
-        free(ct);
+        {
+            cJSON *o = cJSON_CreateObject();
+            cJSON_AddBoolToObject(o, "ok", true);
+            cJSON_AddBoolToObject(o, "updating", true);
+            cJSON_AddNumberToObject(o, "run", run);
+            cJSON_AddStringToObject(o, "message", "Telling Twilio about the new numbers...");
+            return send_json(req, "202 Accepted", o);
+        }
+    case CFG_EDIT_NEEDS_TOKEN: {
         cJSON *o = cJSON_CreateObject();
         cJSON_AddBoolToObject(o, "ok", false);
         cJSON_AddBoolToObject(o, "needs_token", true);
-        cJSON_AddStringToObject(o, "error", provisioned
-                                                ? "The phone numbers changed, so Twilio has to be told. Enter your "
-                                                  "Auth Token below."
-                                                : "Connect to Twilio first.");
+        cJSON_AddStringToObject(o, "error", errbuf[0] ? errbuf : "The phone numbers changed, so Twilio has to be told.");
         return send_json(req, "409 Conflict", o);
     }
-    esp_err_t saved = config_set_contacts(ct);
-    free(ct);
-    if (saved != ESP_OK) {
+    case CFG_EDIT_BUSY:
+    case CFG_EDIT_NO_WIFI:
+        return send_msg(req, "409 Conflict", false, errbuf[0] ? errbuf : "Try again.");
+    case CFG_EDIT_BAD_REQUEST:
+        return send_msg(req, "400 Bad Request", false, errbuf[0] ? errbuf : "Bad request.");
+    default:
         return send_msg(req, "500 Internal Server Error", false, "Could not save. Try again.");
     }
-    ESP_LOGI(TAG, "contacts and schedules saved from the web page");
-    return send_msg(req, "200 OK", true, "Saved.");
 }
 
 /* POST /api/settings {max_call_minutes, lang, emergency_taps}: phone-only
@@ -862,8 +710,9 @@ static esp_err_t h_settings(httpd_req_t *req)
         return send_msg(req, "400 Bad Request", false, msg);
     }
     if (v) {
-        if (config_set_max_call_minutes((unsigned)m) != ESP_OK) {
-            return send_msg(req, "500 Internal Server Error", false, "Could not save. Try again.");
+        char ebuf[80];
+        if (cfg_edit_set_max_call_minutes((unsigned)m, ebuf, sizeof(ebuf)) != ESP_OK) {
+            return send_msg(req, "500 Internal Server Error", false, ebuf[0] ? ebuf : "Could not save. Try again.");
         }
         ESP_LOGI(TAG, "max call length set to %d min from the web page", (int)m);
     }
@@ -1025,13 +874,12 @@ static esp_err_t h_bedtime(httpd_req_t *req)
     }
     b.start_min = (uint16_t)start;
     b.end_min = (uint16_t)end;
-    const char *why = schedule_bedtime_validate(&b);
-    if (why) {
-        char e[80];
-        snprintf(e, sizeof(e), "Bedtime: %s.", why);
-        return send_msg(req, "400 Bad Request", false, e);
+    char ebuf[80];
+    esp_err_t bed_err = cfg_edit_set_bedtime(&b, ebuf, sizeof(ebuf));
+    if (bed_err == ESP_ERR_INVALID_ARG) {
+        return send_msg(req, "400 Bad Request", false, ebuf[0] ? ebuf : "Bad bedtime.");
     }
-    if (config_set_bedtime(&b) != ESP_OK) {
+    if (bed_err != ESP_OK) {
         return send_msg(req, "500 Internal Server Error", false, "Could not save. Try again.");
     }
     ESP_LOGI(TAG, "bedtime %s (%02d:%02d to %02d:%02d) from the web page", b.enabled ? "on" : "off", start / 60,
@@ -1288,6 +1136,112 @@ static esp_err_t h_hangup(httpd_req_t *req)
     return send_msg(req, "200 OK", true, NULL);
 }
 
+/*
+ * POST /api/mqtt {host, port, user, password, clear_password}: Home Assistant
+ * MQTT broker. Empty host turns MQTT off. password left out or empty keeps
+ * the saved one; clear_password: true erases it. Never logged. Device only.
+ */
+static esp_err_t h_mqtt(httpd_req_t *req)
+{
+    if (!post_ok(req)) {
+        return ESP_OK;
+    }
+    cJSON *j = read_json(req);
+    if (!j) {
+        return send_msg(req, "400 Bad Request", false, "Missing, too large or bad request.");
+    }
+    cfg_mqtt_t m;
+    memset(&m, 0, sizeof(m));
+    char host[96], user[80], pass[80];
+    trim_copy(json_str(j, "host"), host, sizeof(host));
+    trim_copy(json_str(j, "user"), user, sizeof(user));
+    strlcpy(pass, json_str(j, "password"), sizeof(pass));
+    const bool clear_pass = cJSON_IsTrue(cJSON_GetObjectItem(j, "clear_password"));
+    const cJSON *pj = cJSON_GetObjectItem(j, "port");
+    int port = 1883;
+    if (pj) {
+        port = json_int(j, "port", 1, 65535);
+    }
+    cJSON *pw = cJSON_GetObjectItem(j, "password");
+    if (cJSON_IsString(pw)) {
+        mbedtls_platform_zeroize(pw->valuestring, strlen(pw->valuestring));
+    }
+    cJSON_Delete(j);
+
+    const char *err = NULL;
+    bool host_ok_name = !host[0];
+    if (host[0]) {
+        host_ok_name = strlen(host) < sizeof(m.host);
+        for (const char *p = host; host_ok_name && *p; p++) {
+            host_ok_name = isalnum((unsigned char)*p) || *p == '.' || *p == '-';
+        }
+    }
+    if (host[0] && !host_ok_name) {
+        err = "The broker name doesn't look right (like homeassistant.local or 192.168.1.10).";
+    } else if (host[0] && port < 0) {
+        err = "Pick a port from 1 to 65535 (1883 is the usual MQTT port).";
+    } else if (strlen(user) >= sizeof(m.user)) {
+        err = "That username is too long.";
+    } else if (strlen(pass) >= sizeof(m.pass)) {
+        err = "That password is too long.";
+    }
+    if (err) {
+        mbedtls_platform_zeroize(pass, sizeof(pass));
+        return send_msg(req, "400 Bad Request", false, err);
+    }
+    strlcpy(m.host, host, sizeof(m.host));
+    strlcpy(m.user, user, sizeof(m.user));
+    strlcpy(m.pass, pass, sizeof(m.pass));
+    mbedtls_platform_zeroize(pass, sizeof(pass));
+    m.port = host[0] ? (uint16_t)port : 1883;
+    const bool keep_pass = !m.pass[0] && !clear_pass;
+    const esp_err_t r = config_set_mqtt(&m, keep_pass);
+    mbedtls_platform_zeroize(&m, sizeof(m));
+    if (r != ESP_OK) {
+        return send_msg(req, "500 Internal Server Error", false, "Could not save. Try again.");
+    }
+    mqtt_ha_reconfigure();
+    ESP_LOGI(TAG, "MQTT broker settings saved from the web page (%s)", host[0] ? "on" : "off");
+    return send_msg(req, "200 OK", true, "Saved.");
+}
+
+/* POST /api/cloud/pair: show a pairing code for a household manager to enter
+ * in the Bell-Towne app. The phone polls until tokens are issued. */
+static esp_err_t h_cloud_pair(httpd_req_t *req)
+{
+    if (!host_ok(req)) {
+        return send_msg(req, "403 Forbidden", false, "bad host");
+    }
+    if (!wifi_is_connected()) {
+        return send_msg(req, "409 Conflict", false, "The phone is not on WiFi.");
+    }
+    char code[8];
+    esp_err_t err = cloud_sync_pair_begin(code, sizeof(code));
+    if (err == ESP_ERR_INVALID_STATE) {
+        return send_msg(req, "409 Conflict", false, "The phone is not on WiFi.");
+    }
+    if (err != ESP_OK) {
+        return send_msg(req, "502 Bad Gateway", false, "Could not reach the Bell-Towne app. Try again.");
+    }
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddBoolToObject(o, "ok", true);
+    cJSON_AddStringToObject(o, "code", code);
+    cJSON_AddStringToObject(o, "message", "Enter this code in the Bell-Towne Kid Phone app.");
+    return send_json(req, "200 OK", o);
+}
+
+/* POST /api/cloud/unlink: drop cloud tokens. Calling still works locally. */
+static esp_err_t h_cloud_unlink(httpd_req_t *req)
+{
+    if (!host_ok(req)) {
+        return send_msg(req, "403 Forbidden", false, "bad host");
+    }
+    if (cloud_sync_unlink() != ESP_OK) {
+        return send_msg(req, "500 Internal Server Error", false, "Could not unlink. Try again.");
+    }
+    return send_msg(req, "200 OK", true, "Unlinked from Bell-Towne. Calling still works on this phone.");
+}
+
 /* ---------------------------------------------------------------------------
  * WiFi networks
  * ------------------------------------------------------------------------- */
@@ -1388,6 +1342,21 @@ static esp_err_t h_wifi_add(httpd_req_t *req)
     } else if (pl != 0 && (pl < 8 || pl > 63)) {
         err = "A WiFi password has 8 to 63 characters. Leave it empty for an open network.";
     }
+    /* Offline (typically on the setup AP): try the credentials before writing
+     * NVS so a typo does not replace a working saved password. Online adds
+     * stay save-only so an active call or the current link is not disrupted. */
+    if (!err && !wifi_is_connected()) {
+        if (sip_call_state() != CALL_IDLE) {
+            mbedtls_platform_zeroize(pass, sizeof(pass));
+            return send_msg(req, "409 Conflict", false, "The phone is in a call. Try again when it has ended.");
+        }
+        ESP_LOGI(TAG, "testing WiFi credentials before saving");
+        if (!wifi_try_network(ssid, pass, APP_WIFI_ATTEMPT_MS + 5000)) {
+            mbedtls_platform_zeroize(pass, sizeof(pass));
+            return send_msg(req, "400 Bad Request", false,
+                            "Could not join that network. Check the name and password — nothing was saved.");
+        }
+    }
     bool updated = false;
     esp_err_t e = ESP_FAIL;
     if (!err) {
@@ -1411,7 +1380,7 @@ static esp_err_t h_wifi_add(httpd_req_t *req)
     cJSON *o = cJSON_CreateObject();
     cJSON_AddBoolToObject(o, "ok", true);
     cJSON_AddBoolToObject(o, "updated", updated);
-    cJSON_AddStringToObject(o, "message", updated ? "Password updated." : "Saved.");
+    cJSON_AddStringToObject(o, "message", updated ? "Password updated." : "Saved. The setup network will turn off in a few seconds.");
     return send_json(req, "200 OK", o);
 }
 
@@ -1533,7 +1502,7 @@ void setup_server_start(void)
     cfg.server_port = APP_HTTP_PORT;
     cfg.stack_size = APP_HTTP_STACK;
     cfg.max_open_sockets = 5;
-    cfg.max_uri_handlers = 19; /* 18 registered */
+    cfg.max_uri_handlers = 21; /* 21 registered */
     cfg.lru_purge_enable = true;
     cfg.core_id = 0;
     httpd_handle_t srv = NULL;
@@ -1554,6 +1523,9 @@ void setup_server_start(void)
         {.uri = "/api/pins", .method = HTTP_POST, .handler = h_pins},
         {.uri = "/api/secret", .method = HTTP_POST, .handler = h_secret},
         {.uri = "/api/secret/test", .method = HTTP_POST, .handler = h_secret_test},
+        {.uri = "/api/mqtt", .method = HTTP_POST, .handler = h_mqtt},
+        {.uri = "/api/cloud/pair", .method = HTTP_POST, .handler = h_cloud_pair},
+        {.uri = "/api/cloud/unlink", .method = HTTP_POST, .handler = h_cloud_unlink},
         {.uri = "/api/call", .method = HTTP_POST, .handler = h_call},
         {.uri = "/api/hangup", .method = HTTP_POST, .handler = h_hangup},
         {.uri = "/api/factory_reset", .method = HTTP_POST, .handler = h_factory_reset},
@@ -1562,7 +1534,7 @@ void setup_server_start(void)
         {.uri = "/api/wifi/add", .method = HTTP_POST, .handler = h_wifi_add},
         {.uri = "/api/wifi/remove", .method = HTTP_POST, .handler = h_wifi_remove},
     };
-    _Static_assert(sizeof(uris) / sizeof(uris[0]) <= 19, "raise max_uri_handlers");
+    _Static_assert(sizeof(uris) / sizeof(uris[0]) <= 21, "raise max_uri_handlers");
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
         esp_err_t e = httpd_register_uri_handler(srv, &uris[i]);
         if (e != ESP_OK) {

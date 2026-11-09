@@ -175,11 +175,27 @@ strongest other saved network), and the last saved network cannot be
 removed (the phone could never get back on WiFi; use a factory reset to
 start over). Passwords are never shown again, not even on the setup page.
 
+**WiFi repair without USB (setup AP)**: if no network is saved, or the phone
+cannot join any saved network for about 90 seconds, it opens a password-
+protected setup network named `kidphone-` plus the last three bytes of its
+WiFi MAC (for example `kidphone-a1b2c3`). Join that network from a phone or
+laptop; the WPA2 password is `kp` plus four hex bytes from the same MAC
+(`kp` + MAC bytes 3–6, lower case). Open `http://192.168.4.1/` and use the
+**WiFi networks** card. While offline the phone **tries** new credentials
+before saving them, so a wrong password does not overwrite a working saved
+one. Contacts, Twilio, schedules and other settings stay intact. After a
+stable join to home WiFi the setup network turns off in a few seconds.
+Association/DHCP problems open this AP; "WiFi up but Twilio/internet down"
+does not. Improv Serial still works; holding BOOT for 10 s is still only a
+factory reset, not a way to open the AP. The AP password is never written to
+the serial log.
+
 At power-on and whenever the WiFi drops, the phone looks at all the
 networks around it and joins the strongest saved one it can see (with mesh
 WiFi or extenders, the strongest access point of that network). If that
 fails (wrong password, say) it tries the next one. If none works it tries
-again after 10 seconds, then 20, 40 and every 60 seconds, forever. Once it
+again after 10 seconds, then 20, 40 and every 60 seconds, forever (and opens
+the setup AP after about 90 seconds of sustained failure). Once it
 is on a network that works it stays there, even if another saved network
 is stronger: it only switches after a disconnect.
 
@@ -200,10 +216,10 @@ the page jumps to this card.
 **Taking the phone to another house**: add that house's WiFi on the setup
 page **before** you leave, while the phone is still on your WiFi (you need
 its name and password). At the other house the phone joins it by itself.
-If you forgot: plug the phone's COM port into a computer there, open the
-installer page, press **Connect**, and use the WiFi setup (Improv) to add the
-network; the networks already saved are kept. As a last resort, hold BOOT
-for 10 s (factory reset) and set the phone up from step 1.
+If you forgot: wait for the phone's setup WiFi (`kidphone-…`) and open
+`http://192.168.4.1/`, or plug the COM port into a computer and use Improv
+on the installer page; the networks already saved are kept. As a last
+resort, hold BOOT for 10 s (factory reset) and set the phone up from step 1.
 
 **Handset troubleshooting** (setup page, **Advanced**): for a handset that
 plugs in but stays silent. It shows the handset's name, USB ID and the
@@ -584,9 +600,9 @@ phone only has the station interface, so it is only reachable on the home LAN.
 | `POST /api/pins` | `{buttons:[{button, lamp} x 1..24]}`: GPIO of each button and its light (`lamp` -1 or null = no light), in button order. 400 if a pin is not in the assignable list or used twice; 409 while setup runs, or if a button that would go away still has a number or a secret mode (clear and save it first). Applied live within about 100 ms. `GET /api/status` has `pins` {`max`, `assignable`, `buttons`}. Device only, no token |
 | `POST /api/call` | `{contact: i}` test call, same rules as button i (409 if outside their hours, or while a secret is being recorded) except bedtime, which does not apply to it (the parent testing) |
 | `POST /api/hangup` | hang up |
-| `GET /api/wifi` | `{connected, state` ("connected", "connecting", "scanning", "waiting", "no networks")`, ssid, rssi, ip, max, uptime_s, saved: [{ssid, secured, connected, in_last_scan, last_rssi, last_seen_ago_s, last_result, last_text, last_reason, last_try_ago_s}], attempts: [{ssid, rssi, result, text, reason, at_s, ago_s, improv}]}`. `attempts` = the last 8, newest first (RAM only, since boot). `result`/`last_result` is one of `connected`, `wrong_password`, `not_found`, `timeout`, `no_ip`, `dropped`, `other`; `text` is the plain-English version shown on the page; `reason` is the driver's disconnect reason (0 = none). History fields are left out when unknown: `in_last_scan` before the first scan, `last_rssi`/`last_seen_ago_s` if no scan saw it, `last_*` result fields if it was never tried, `rssi` if the scan before that attempt did not see it, `improv` unless true. The same object is `wifi` in `/api/status`. Never a password |
+| `GET /api/wifi` | `{connected, state` ("connected", "connecting", "scanning", "waiting", "no networks")`, ssid, rssi, ip, ap: {active, ssid, ip, password?}, max, uptime_s, saved: [{ssid, secured, connected, in_last_scan, last_rssi, last_seen_ago_s, last_result, last_text, last_reason, last_try_ago_s}], attempts: [{ssid, rssi, result, text, reason, at_s, ago_s, improv}]}`. `attempts` = the last 8, newest first (RAM only, since boot). `result`/`last_result` is one of `connected`, `wrong_password`, `not_found`, `timeout`, `no_ip`, `dropped`, `other`; `text` is the plain-English version shown on the page; `reason` is the driver's disconnect reason (0 = none). History fields are left out when unknown: `in_last_scan` before the first scan, `last_rssi`/`last_seen_ago_s` if no scan saw it, `last_*` result fields if it was never tried, `rssi` if the scan before that attempt did not see it, `improv` unless true. The same object is `wifi` in `/api/status`. Station passwords are never returned. `ap.password` is present only while the setup softAP is up |
 | `POST /api/wifi/scan` | `{}`. Blocks a few seconds; `{networks: [{ssid, rssi, bars (1-4), secured, saved, connected}]}`, one entry per SSID (strongest access point), strongest first, hidden networks left out. The connection stays up. 409 during a call (the scan would pause the audio), 503 if the radio is busy |
-| `POST /api/wifi/add` | `{ssid, password}`: SSID 1..32 bytes (not trimmed), password empty (open) or 8..63 characters (400 otherwise). Same SSID = new password (`updated: true`). 409 when 5 are saved and this one is new. The current connection is kept |
+| `POST /api/wifi/add` | `{ssid, password}`: SSID 1..32 bytes (not trimmed), password empty (open) or 8..63 characters (400 otherwise). Same SSID = new password (`updated: true`). 409 when 5 are saved and this one is new. When the station is already online, the current connection is kept and the network is saved without a live try. When offline (setup AP), the phone tries the credentials first and only then writes NVS (400 if the try fails; saved networks are unchanged) |
 | `POST /api/wifi/remove` | `{ssid, confirm}`: 404 if not saved; 409 if it is the only saved network; 409 `{needs_confirm: true}` if the phone is on it and `confirm` is not true. With confirm the phone leaves it after the reply and joins the best other saved network |
 | `POST /api/factory_reset` | `{confirm: "RESET"}` (exactly, checked on the phone; 400 otherwise, 409 while setup runs). Replies 202, then about 0.5 s later stops any call, erases the `kidphone` NVS namespace and the WiFi driver's copy, and reboots into setup |
 
@@ -1275,7 +1291,7 @@ src/setup_server.c/.h setup web page + JSON API, mDNS kidphone.local
 src/setup_page.html   the setup page (embedded in flash)
 src/twilio_provision.c/.h Twilio self-provisioning task
 src/status_led.c/.h   onboard WS2812 status light
-src/wifi.c/.h         WiFi manager: up to 5 saved networks, strongest visible first, backoff, scan, Improv try
+src/wifi.c/.h         WiFi manager: up to 5 saved networks, strongest visible first, backoff, scan, Improv try, softAP recovery (AP+STA)
 src/sip.c/.h          minimal SIP UA over UDP: INVITE + digest auth, CANCEL, BYE, NAT handling, call state
 src/rtp.c/.h          PCMU RTP sender/receiver tasks, jitter buffer, stream buffer to the audio task
 src/usb_audio.c/.h    USB host + UAC driver: hot-plug, descriptor log, format choice, volume/mute
