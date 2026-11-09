@@ -124,6 +124,12 @@ footer { color: var(--muted); font-size: 14px; text-align: center; margin-top: 2
   <h1>Kid Phone</h1>
   <p class="sub">Set up who the phone can call. Everything stays between this phone and your own Twilio account.</p>
 
+  <section class="card hidden" id="c-ap">
+    <h2>WiFi setup network</h2>
+    <p id="ap-banner">The phone could not join your home WiFi, so it opened its own setup network. Add or fix a WiFi network below. Your Twilio settings and contacts stay as they are.</p>
+    <p class="hint" id="ap-how"></p>
+  </section>
+
   <section class="card">
     <h2>Status</h2>
     <div class="row"><span>WiFi</span><span><span id="s-wifi">...</span><a class="jump" href="#c-wifi" id="l-wifi">WiFi settings</a></span></div>
@@ -333,7 +339,7 @@ footer { color: var(--muted); font-size: 14px; text-align: center; margin-top: 2
     </div>
     <p class="hint" id="w-pass-hint">8 to 63 characters. Leave it empty for an open network.</p>
     <button type="button" id="b-wadd">Add</button>
-    <p class="hint">Adding does not move the phone off the network it is on now. It uses the new one the next time it connects.</p>
+    <p class="hint" id="w-add-hint">Adding does not move the phone off the network it is on now. It uses the new one the next time it connects.</p>
     <p class="hint" id="wifi-msg"></p>
   </section>
 
@@ -837,7 +843,21 @@ function availText(c) {
 
 function render() {
   const w = st.wifi, t = st.twilio, cs = t.contacts || [];
-  setText("s-wifi", w.connected ? "Connected to " + w.ssid + (w.ip ? " (" + w.ip + ")" : "") : "Not connected", w.connected ? "good" : "bad");
+  const ap = (w && w.ap) || {};
+  show("c-ap", !!ap.active);
+  if (ap.active) {
+    let how = "Open this page at http://" + (ap.ip || "192.168.4.1") + "/ while joined to \"" + (ap.ssid || "kidphone-…") + "\".";
+    if (ap.password) how += " Network password: " + ap.password + " (also derived from the board MAC; never written to logs).";
+    $("ap-how").textContent = how;
+    $("w-add-hint").textContent = "While offline the phone tries the network before saving, so a wrong password does not erase a working one. After a successful save the setup network turns off in a few seconds.";
+    $("b-wadd").textContent = "Try and save";
+  } else {
+    $("w-add-hint").textContent = "Adding does not move the phone off the network it is on now. It uses the new one the next time it connects.";
+    $("b-wadd").textContent = "Add";
+  }
+  setText("s-wifi", w.connected ? "Connected to " + w.ssid + (w.ip ? " (" + w.ip + ")" : "") :
+    (ap.active ? "Not connected (setup network \"" + (ap.ssid || "") + "\" is on)" : "Not connected"),
+    w.connected ? "good" : "bad");
   renderWifi(w);
   setText("s-tw", t.provisioned ? "Ready" : "Not set up yet", t.provisioned ? "good" : "bad");
   setText("s-hs", st.handset ? "Plugged in" : "Not detected (plug it into the USB port marked OTG)", st.handset ? "good" : "bad");
@@ -1114,7 +1134,9 @@ $("b-wadd").addEventListener("click", async () => {
   if (!exists && saved.length >= (st.wifi.max || 5)) {
     msg.textContent = "The phone keeps " + (st.wifi.max || 5) + " networks at most. Remove one first."; return;
   }
+  const offline = !(st && st.wifi && st.wifi.connected);
   $("b-wadd").disabled = true;
+  if (offline) msg.textContent = "Trying \"" + ssid + "\"…";
   let r;
   try { r = await api("/api/wifi/add", {ssid, password}); } catch (e) { r = {ok: false, j: {}}; }
   $("b-wadd").disabled = false;
@@ -1124,8 +1146,8 @@ $("b-wadd").addEventListener("click", async () => {
   scanSecured = null;
   document.querySelectorAll("#scan-list .pick").forEach((b) => b.classList.remove("sel"));
   const on = st && st.wifi.connected ? st.wifi.ssid : "";
-  msg.textContent = r.j.updated ? "Password updated for \"" + ssid + "\"." :
-    "Saved \"" + ssid + "\"." + (on && on !== ssid ? " The phone stays on \"" + on + "\" for now and uses the new one the next time it connects." : "");
+  msg.textContent = r.j.message || (r.j.updated ? "Password updated for \"" + ssid + "\"." :
+    "Saved \"" + ssid + "\"." + (on && on !== ssid ? " The phone stays on \"" + on + "\" for now and uses the new one the next time it connects." : ""));
   wifiSig = null;
   kick();
 });

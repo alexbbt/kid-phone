@@ -181,6 +181,18 @@
 #define APP_WIFI_BACKOFF_MAX_MS 60000
 #define APP_WIFI_ATTEMPT_MS     20000
 #define APP_WIFI_SCAN_TIMEOUT_MS 10000
+/* SoftAP recovery (AP+STA): after this long without a station IP while
+ * saved networks exist, open a setup AP so a parent can repair WiFi from a
+ * phone browser. With no saved network the AP opens immediately. */
+#define APP_WIFI_AP_RECOVERY_MS 90000
+#define APP_WIFI_AP_SSID_PREFIX "kidphone-"
+#define APP_WIFI_AP_CHANNEL     1
+#define APP_WIFI_AP_MAX_CONN    4
+/* SoftAP IPv4 (esp_netif default softAP). Documented for recovery. */
+#define APP_WIFI_AP_IP          "192.168.4.1"
+/* Hold the AP this long after STA gets an IP so an HTTP "Saved" reply can
+ * finish on the AP client before the radio drops it. */
+#define APP_WIFI_AP_STOP_DELAY_MS 3000
 
 /* A call whose WiFi is gone this long, or that finds the phone on a new IP
  * address (another network), is ended locally: its SIP and media addresses
