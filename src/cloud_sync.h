@@ -1,11 +1,11 @@
 /*
  * Bell-Towne app cloud sync: outbound HTTPS only (NAT-safe).
  *
- * Pairing code on the setup page → manager claims it in the app → phone
- * polls for access/refresh tokens (NVS). A background task pushes call-log
- * events and device health, then pulls schedule/bedtime commands and applies
- * them through config_set_contacts / config_set_bedtime (same path as local
- * UI / MQTT). Certificate validation is always on.
+ * Pairing code on the setup page → owner claims it in the app → phone
+ * polls for a long-lived device_token (NVS). A background task pushes
+ * call-log events and device health, then pulls set_contact_schedule
+ * commands and applies them through config_set_contacts (same path as
+ * local UI / MQTT). Certificate validation is always on.
  */
 #pragma once
 

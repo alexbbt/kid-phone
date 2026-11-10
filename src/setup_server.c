@@ -38,6 +38,8 @@ static const char *TAG = "setup";
 
 extern const char page_start[] asm("_binary_setup_page_html_start");
 extern const char page_end[] asm("_binary_setup_page_html_end");
+extern const char favicon_start[] asm("_binary_favicon_svg_start");
+extern const char favicon_end[] asm("_binary_favicon_svg_end");
 
 /* ---------------------------------------------------------------------------
  * Request guards
@@ -141,6 +143,18 @@ static esp_err_t h_page(httpd_req_t *req)
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_set_hdr(req, "X-Frame-Options", "DENY");
     return httpd_resp_send(req, page_start, page_end - page_start - 1);
+}
+
+/* Classic phone icon (SVG). Also answered at /favicon.ico so browsers that
+ * probe that path still get an icon. */
+static esp_err_t h_favicon(httpd_req_t *req)
+{
+    if (!host_ok(req)) {
+        return send_msg(req, "403 Forbidden", false, "bad host");
+    }
+    httpd_resp_set_type(req, "image/svg+xml");
+    httpd_resp_set_hdr(req, "Cache-Control", "public, max-age=86400");
+    return httpd_resp_send(req, favicon_start, favicon_end - favicon_start - 1);
 }
 
 static void add_hhmm(cJSON *o, const char *key, unsigned minute)
@@ -400,6 +414,8 @@ static esp_err_t h_status(httpd_req_t *req)
     cJSON_AddNumberToObject(mq, "port", c->mqtt.port ? c->mqtt.port : 1883);
     cJSON_AddStringToObject(mq, "user", c->mqtt.user);
     cJSON_AddBoolToObject(mq, "has_password", c->mqtt.pass[0] != '\0');
+    cJSON_AddStringToObject(mq, "expose",
+                            c->mqtt.expose == CFG_MQTT_EXPOSE_CONTROLS ? "controls" : "full");
     cJSON_AddStringToObject(mq, "state", mqtt_ha_state_name());
     cJSON_AddBoolToObject(mq, "connected", mqtt_ha_connected());
     /* Bell-Towne cloud: paired state and pairing code only — never tokens. */
@@ -1137,9 +1153,11 @@ static esp_err_t h_hangup(httpd_req_t *req)
 }
 
 /*
- * POST /api/mqtt {host, port, user, password, clear_password}: Home Assistant
- * MQTT broker. Empty host turns MQTT off. password left out or empty keeps
- * the saved one; clear_password: true erases it. Never logged. Device only.
+ * POST /api/mqtt {host, port, user, password, clear_password, expose}: Home
+ * Assistant MQTT broker. Empty host turns MQTT off. password left out or empty
+ * keeps the saved one; clear_password: true erases it. expose is "controls"
+ * (call buttons + diagnostics) or "full" (also contacts/schedules/bedtime).
+ * Never logged. Device only.
  */
 static esp_err_t h_mqtt(httpd_req_t *req)
 {
@@ -1152,10 +1170,11 @@ static esp_err_t h_mqtt(httpd_req_t *req)
     }
     cfg_mqtt_t m;
     memset(&m, 0, sizeof(m));
-    char host[96], user[80], pass[80];
+    char host[96], user[80], pass[80], expose[16];
     trim_copy(json_str(j, "host"), host, sizeof(host));
     trim_copy(json_str(j, "user"), user, sizeof(user));
     strlcpy(pass, json_str(j, "password"), sizeof(pass));
+    trim_copy(json_str(j, "expose"), expose, sizeof(expose));
     const bool clear_pass = cJSON_IsTrue(cJSON_GetObjectItem(j, "clear_password"));
     const cJSON *pj = cJSON_GetObjectItem(j, "port");
     int port = 1883;
@@ -1176,13 +1195,28 @@ static esp_err_t h_mqtt(httpd_req_t *req)
             host_ok_name = isalnum((unsigned char)*p) || *p == '.' || *p == '-';
         }
     }
-    if (host[0] && !host_ok_name) {
+    uint8_t expose_mode = CFG_MQTT_EXPOSE_FULL;
+    if (expose[0]) {
+        if (strcmp(expose, "controls") == 0) {
+            expose_mode = CFG_MQTT_EXPOSE_CONTROLS;
+        } else if (strcmp(expose, "full") == 0) {
+            expose_mode = CFG_MQTT_EXPOSE_FULL;
+        } else {
+            err = "Pick what Home Assistant sees: controls or full.";
+        }
+    } else {
+        cfg_mqtt_t cur;
+        config_get_mqtt(&cur);
+        expose_mode = cur.expose <= CFG_MQTT_EXPOSE_FULL ? cur.expose : CFG_MQTT_EXPOSE_FULL;
+        mbedtls_platform_zeroize(&cur, sizeof(cur));
+    }
+    if (!err && host[0] && !host_ok_name) {
         err = "The broker name doesn't look right (like homeassistant.local or 192.168.1.10).";
-    } else if (host[0] && port < 0) {
+    } else if (!err && host[0] && port < 0) {
         err = "Pick a port from 1 to 65535 (1883 is the usual MQTT port).";
-    } else if (strlen(user) >= sizeof(m.user)) {
+    } else if (!err && strlen(user) >= sizeof(m.user)) {
         err = "That username is too long.";
-    } else if (strlen(pass) >= sizeof(m.pass)) {
+    } else if (!err && strlen(pass) >= sizeof(m.pass)) {
         err = "That password is too long.";
     }
     if (err) {
@@ -1194,6 +1228,7 @@ static esp_err_t h_mqtt(httpd_req_t *req)
     strlcpy(m.pass, pass, sizeof(m.pass));
     mbedtls_platform_zeroize(pass, sizeof(pass));
     m.port = host[0] ? (uint16_t)port : 1883;
+    m.expose = expose_mode;
     const bool keep_pass = !m.pass[0] && !clear_pass;
     const esp_err_t r = config_set_mqtt(&m, keep_pass);
     mbedtls_platform_zeroize(&m, sizeof(m));
@@ -1205,8 +1240,8 @@ static esp_err_t h_mqtt(httpd_req_t *req)
     return send_msg(req, "200 OK", true, "Saved.");
 }
 
-/* POST /api/cloud/pair: show a pairing code for a household manager to enter
- * in the Bell-Towne app. The phone polls until tokens are issued. */
+/* POST /api/cloud/pair: show a pairing code for the device owner to enter
+ * in the Bell-Towne app. The phone polls until a device_token is issued. */
 static esp_err_t h_cloud_pair(httpd_req_t *req)
 {
     if (!host_ok(req)) {
@@ -1230,7 +1265,7 @@ static esp_err_t h_cloud_pair(httpd_req_t *req)
     return send_json(req, "200 OK", o);
 }
 
-/* POST /api/cloud/unlink: drop cloud tokens. Calling still works locally. */
+/* POST /api/cloud/unlink: drop the device token. Calling still works locally. */
 static esp_err_t h_cloud_unlink(httpd_req_t *req)
 {
     if (!host_ok(req)) {
@@ -1502,7 +1537,7 @@ void setup_server_start(void)
     cfg.server_port = APP_HTTP_PORT;
     cfg.stack_size = APP_HTTP_STACK;
     cfg.max_open_sockets = 5;
-    cfg.max_uri_handlers = 21; /* 21 registered */
+    cfg.max_uri_handlers = 23; /* keep in sync with uris[] below */
     cfg.lru_purge_enable = true;
     cfg.core_id = 0;
     httpd_handle_t srv = NULL;
@@ -1513,6 +1548,8 @@ void setup_server_start(void)
     }
     static const httpd_uri_t uris[] = {
         {.uri = "/", .method = HTTP_GET, .handler = h_page},
+        {.uri = "/favicon.svg", .method = HTTP_GET, .handler = h_favicon},
+        {.uri = "/favicon.ico", .method = HTTP_GET, .handler = h_favicon},
         {.uri = "/api/status", .method = HTTP_GET, .handler = h_status},
         {.uri = "/api/provision", .method = HTTP_POST, .handler = h_provision},
         {.uri = "/api/contacts", .method = HTTP_POST, .handler = h_contacts},
@@ -1534,7 +1571,7 @@ void setup_server_start(void)
         {.uri = "/api/wifi/add", .method = HTTP_POST, .handler = h_wifi_add},
         {.uri = "/api/wifi/remove", .method = HTTP_POST, .handler = h_wifi_remove},
     };
-    _Static_assert(sizeof(uris) / sizeof(uris[0]) <= 21, "raise max_uri_handlers");
+    _Static_assert(sizeof(uris) / sizeof(uris[0]) <= 23, "raise max_uri_handlers");
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
         esp_err_t e = httpd_register_uri_handler(srv, &uris[i]);
         if (e != ESP_OK) {

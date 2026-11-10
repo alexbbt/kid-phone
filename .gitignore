@@ -8,3 +8,4 @@ sdkconfig.esp32s3
 src/secrets.h
 web/kid_phone.bin
 __pycache__/
+backups/

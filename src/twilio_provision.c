@@ -1528,7 +1528,13 @@ static prov_t *begin_run(void)
 
     prov_t *p = calloc(1, sizeof(prov_t));
     if (!p) {
+        xSemaphoreTake(s_lock, portMAX_DELAY);
         s_state = ST_FAILED;
+        strlcpy(s_error, "The phone ran out of memory starting setup.", sizeof(s_error));
+        strlcpy(s_hint, "Unplug the handset if it is connected, wait a few seconds, and press Run setup again.",
+                sizeof(s_hint));
+        xSemaphoreGive(s_lock);
+        ESP_LOGE(TAG, "provision context alloc failed (need %u bytes)", (unsigned)sizeof(prov_t));
     }
     return p;
 }
@@ -1552,7 +1558,12 @@ static bool launch(prov_t *p)
     if (xTaskCreatePinnedToCore(prov_task, "provision", APP_PROV_STACK, p, 4, NULL, 0) != pdPASS) {
         mbedtls_platform_zeroize(p, sizeof(*p));
         free(p);
+        xSemaphoreTake(s_lock, portMAX_DELAY);
         s_state = ST_FAILED;
+        strlcpy(s_error, "The phone could not start the setup task.", sizeof(s_error));
+        strlcpy(s_hint, "Restart the phone and press Run setup again.", sizeof(s_hint));
+        xSemaphoreGive(s_lock);
+        ESP_LOGE(TAG, "provision task create failed (stack %d)", APP_PROV_STACK);
         return false;
     }
     return true;

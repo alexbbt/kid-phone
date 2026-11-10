@@ -1,9 +1,14 @@
 # Kid Phone — Home Assistant Lovelace dashboard
 #
 # After MQTT discovery, entities appear under device "Kid Phone".
-# Entity ids below match the default HA slug of the discovery names
-# (device "Kid Phone" + entity name). If yours differ, rename them in
-# Settings → Devices → Kid Phone, or edit the entity_id lines here.
+#
+# Call buttons: unique_id is stable (…_cN_call). Friendly names follow the
+# person ("Call Grandma"). Entity ids below assume first discovery used
+# "Call contact N"; if HA named them from a person (e.g. call_grandma), pick
+# the right entities under Settings → Devices → Kid Phone.
+#
+# Config entities (Contact N name/number, schedules, bedtime) appear only when
+# the phone’s MQTT expose mode is "full". The Phone view works in "controls".
 #
 # Schedule windows use plain text, not raw JSON:
 #   YNYYYYN 17:00-20:00
@@ -32,6 +37,27 @@ views:
             name: Hang up
 
       - type: entities
+        title: Call someone
+        entities:
+          - entity: button.kid_phone_call_contact_1
+          - entity: button.kid_phone_call_contact_2
+          - entity: button.kid_phone_call_contact_3
+          - entity: button.kid_phone_call_contact_4
+          - entity: button.kid_phone_call_contact_5
+
+      - type: markdown
+        content: |
+          **Call buttons** show the person’s name (Call Grandma). Available
+          hours apply; bedtime does not (same as the setup page). Call and
+          hang-up are never retained.
+
+          Use the **Setup** view when MQTT expose is **full** (contacts,
+          schedules, bedtime).
+
+  - title: Setup
+    path: kid-phone-setup
+    cards:
+      - type: entities
         title: Call length & bedtime
         entities:
           - entity: number.kid_phone_max_call_length
@@ -50,6 +76,8 @@ views:
       - type: entities
         title: Contact 1
         entities:
+          - entity: button.kid_phone_call_contact_1
+            name: Call
           - entity: text.kid_phone_contact_1_name
             name: Name
           - entity: text.kid_phone_contact_1_number
@@ -75,13 +103,14 @@ views:
           Letters are Sun→Sat (`Y` = that day). Example weekdays 5–8 pm:
           `NYYYYYN 17:00-20:00`. Clear a window by saving an empty value.
 
-          Number changes update Twilio’s allow-list the same way as the
-          phone’s setup page. Hang up is never retained (no replay after a
-          broker restart).
+          Config titles stay **Contact N** so renaming a person only changes
+          the name value, not the entity.
 
       - type: entities
         title: Contact 2
         entities:
+          - entity: button.kid_phone_call_contact_2
+            name: Call
           - entity: text.kid_phone_contact_2_name
             name: Name
           - entity: text.kid_phone_contact_2_number
@@ -104,6 +133,8 @@ views:
       - type: entities
         title: Contact 3
         entities:
+          - entity: button.kid_phone_call_contact_3
+            name: Call
           - entity: text.kid_phone_contact_3_name
             name: Name
           - entity: text.kid_phone_contact_3_number
@@ -126,6 +157,8 @@ views:
       - type: entities
         title: Contact 4
         entities:
+          - entity: button.kid_phone_call_contact_4
+            name: Call
           - entity: text.kid_phone_contact_4_name
             name: Name
           - entity: text.kid_phone_contact_4_number
@@ -148,6 +181,8 @@ views:
       - type: entities
         title: Contact 5
         entities:
+          - entity: button.kid_phone_call_contact_5
+            name: Call
           - entity: text.kid_phone_contact_5_name
             name: Name
           - entity: text.kid_phone_contact_5_number

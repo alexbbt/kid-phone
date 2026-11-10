@@ -19,7 +19,9 @@
 #include "cfg_edit.h"
 #include "config_store.h"
 #include "schedule.h"
+#include "secret.h"
 #include "sip.h"
+#include "twilio_provision.h"
 #include "wifi.h"
 
 static const char *TAG = "mqtt_ha";
@@ -205,15 +207,67 @@ static void topic_cmd(char *out, size_t len, const char *leaf)
     snprintf(out, len, "%s/%s/set", s_base, leaf);
 }
 
+static void load_contacts(cfg_contact_t *ct);
+static void handle_call_contact(int idx, bool retain);
+
+/* Empty retained discovery config → HA removes the entity. */
+static void undiscover(const char *component, const char *object_id)
+{
+    char topic[160];
+    snprintf(topic, sizeof(topic), "%s/%s/%s/%s/config", DISCOVERY_PREFIX, component, s_device_id, object_id);
+    pub(topic, "", 1, true);
+    vTaskDelay(pdMS_TO_TICKS(20));
+}
+
+static void undiscover_full_config(int slots)
+{
+    undiscover("number", "max_call_min");
+    undiscover("switch", "bedtime_on");
+    undiscover("text", "bedtime_start");
+    undiscover("text", "bedtime_end");
+    undiscover("text", "home_tz");
+    undiscover("text", "home_tz_name");
+    char oid[40];
+    for (int i = 0; i < slots && i < MQTT_MAX_SLOTS; i++) {
+        const int n = i + 1;
+        snprintf(oid, sizeof(oid), "c%d_name", n);
+        undiscover("text", oid);
+        snprintf(oid, sizeof(oid), "c%d_number", n);
+        undiscover("text", oid);
+        snprintf(oid, sizeof(oid), "c%d_sched", n);
+        undiscover("switch", oid);
+        snprintf(oid, sizeof(oid), "c%d_tz", n);
+        undiscover("text", oid);
+        snprintf(oid, sizeof(oid), "c%d_tzname", n);
+        undiscover("text", oid);
+        for (int w = 0; w < CFG_MAX_WINDOWS; w++) {
+            snprintf(oid, sizeof(oid), "c%d_w%d", n, w + 1);
+            undiscover("text", oid);
+        }
+    }
+}
+
+static uint8_t mqtt_expose_mode(void)
+{
+    cfg_mqtt_t m;
+    config_get_mqtt(&m);
+    uint8_t ex = m.expose;
+    mbedtls_platform_zeroize(&m, sizeof(m));
+    return ex <= CFG_MQTT_EXPOSE_FULL ? ex : CFG_MQTT_EXPOSE_FULL;
+}
+
 static void publish_discovery(void)
 {
     s_slots = cfg_edit_contact_slots();
     if (s_slots > MQTT_MAX_SLOTS) {
         s_slots = MQTT_MAX_SLOTS;
     }
+    const uint8_t expose = mqtt_expose_mode();
+    const bool full = expose == CFG_MQTT_EXPOSE_FULL;
 
     char st[128], cmd[136], name[48], oid[40];
 
+    /* Diagnostics (both modes). */
     topic_state(st, sizeof(st), "firmware");
     discover_sensor("firmware", "Firmware", st, NULL, NULL, NULL);
 
@@ -226,77 +280,107 @@ static void publish_discovery(void)
     topic_state(st, sizeof(st), "last_error");
     discover_sensor("last_error", "Last error", st, NULL, NULL, NULL);
 
-    topic_state(st, sizeof(st), "max_call_min");
-    topic_cmd(cmd, sizeof(cmd), "max_call_min");
-    discover_number("max_call_min", "Max call length", st, cmd, APP_CALL_MAX_MIN_LO, APP_CALL_MAX_MIN_HI, "min");
-
-    topic_state(st, sizeof(st), "bedtime/enabled");
-    topic_cmd(cmd, sizeof(cmd), "bedtime/enabled");
-    discover_switch("bedtime_on", "Bedtime", st, cmd);
-
-    topic_state(st, sizeof(st), "bedtime/start");
-    topic_cmd(cmd, sizeof(cmd), "bedtime/start");
-    discover_text("bedtime_start", "Bedtime starts", st, cmd, 5);
-
-    topic_state(st, sizeof(st), "bedtime/end");
-    topic_cmd(cmd, sizeof(cmd), "bedtime/end");
-    discover_text("bedtime_end", "Bedtime ends", st, cmd, 5);
-
-    topic_state(st, sizeof(st), "home_tz");
-    topic_cmd(cmd, sizeof(cmd), "home_tz");
-    discover_text("home_tz", "Home time zone", st, cmd, 47);
-
-    topic_state(st, sizeof(st), "home_tz_name");
-    topic_cmd(cmd, sizeof(cmd), "home_tz_name");
-    discover_text("home_tz_name", "Home time zone name", st, cmd, 39);
-
-    for (int i = 0; i < s_slots; i++) {
-        const int n = i + 1;
-        snprintf(oid, sizeof(oid), "c%d_name", n);
-        snprintf(name, sizeof(name), "Contact %d name", n);
-        snprintf(st, sizeof(st), "%s/contact/%d/name", s_base, n);
-        snprintf(cmd, sizeof(cmd), "%s/contact/%d/name/set", s_base, n);
-        discover_text(oid, name, st, cmd, 31);
-
-        snprintf(oid, sizeof(oid), "c%d_number", n);
-        snprintf(name, sizeof(name), "Contact %d number", n);
-        snprintf(st, sizeof(st), "%s/contact/%d/number", s_base, n);
-        snprintf(cmd, sizeof(cmd), "%s/contact/%d/number/set", s_base, n);
-        discover_text(oid, name, st, cmd, 19);
-
-        snprintf(oid, sizeof(oid), "c%d_sched", n);
-        snprintf(name, sizeof(name), "Contact %d schedule", n);
-        snprintf(st, sizeof(st), "%s/contact/%d/schedule/enabled", s_base, n);
-        snprintf(cmd, sizeof(cmd), "%s/contact/%d/schedule/enabled/set", s_base, n);
-        discover_switch(oid, name, st, cmd);
-
-        snprintf(oid, sizeof(oid), "c%d_tz", n);
-        snprintf(name, sizeof(name), "Contact %d time zone", n);
-        snprintf(st, sizeof(st), "%s/contact/%d/schedule/tz", s_base, n);
-        snprintf(cmd, sizeof(cmd), "%s/contact/%d/schedule/tz/set", s_base, n);
-        discover_text(oid, name, st, cmd, 47);
-
-        snprintf(oid, sizeof(oid), "c%d_tzname", n);
-        snprintf(name, sizeof(name), "Contact %d time zone name", n);
-        snprintf(st, sizeof(st), "%s/contact/%d/schedule/tz_name", s_base, n);
-        snprintf(cmd, sizeof(cmd), "%s/contact/%d/schedule/tz_name/set", s_base, n);
-        discover_text(oid, name, st, cmd, 39);
-
-        for (int w = 0; w < CFG_MAX_WINDOWS; w++) {
-            snprintf(oid, sizeof(oid), "c%d_w%d", n, w + 1);
-            snprintf(name, sizeof(name), "Contact %d window %d", n, w + 1);
-            snprintf(st, sizeof(st), "%s/contact/%d/schedule/window/%d", s_base, n, w + 1);
-            snprintf(cmd, sizeof(cmd), "%s/contact/%d/schedule/window/%d/set", s_base, n, w + 1);
-            /* Format: DDDDDDD HH:MM-HH:MM  (Sun..Sat as Y/N), or empty to clear */
-            discover_text(oid, name, st, cmd, 24);
-        }
-    }
-
     topic_cmd(cmd, sizeof(cmd), "hangup");
     discover_button("hangup", "Hang up", cmd);
 
+    /* Call buttons: unique_id stays cN_call; friendly name follows the person
+     * ("Call Grandma") and is refreshed whenever discovery is republished. */
+    cfg_contact_t *ct = calloc(CFG_MAX_CONTACTS, sizeof(cfg_contact_t));
+    if (ct) {
+        load_contacts(ct);
+    }
+    for (int i = 0; i < s_slots; i++) {
+        const int n = i + 1;
+        const char *who = (ct && ct[i].name[0]) ? ct[i].name : NULL;
+        snprintf(oid, sizeof(oid), "c%d_call", n);
+        if (who) {
+            snprintf(name, sizeof(name), "Call %s", who);
+        } else {
+            snprintf(name, sizeof(name), "Call contact %d", n);
+        }
+        snprintf(cmd, sizeof(cmd), "%s/contact/%d/call/set", s_base, n);
+        discover_button(oid, name, cmd);
+    }
+
+    if (full) {
+        topic_state(st, sizeof(st), "max_call_min");
+        topic_cmd(cmd, sizeof(cmd), "max_call_min");
+        discover_number("max_call_min", "Max call length", st, cmd, APP_CALL_MAX_MIN_LO, APP_CALL_MAX_MIN_HI, "min");
+
+        topic_state(st, sizeof(st), "bedtime/enabled");
+        topic_cmd(cmd, sizeof(cmd), "bedtime/enabled");
+        discover_switch("bedtime_on", "Bedtime", st, cmd);
+
+        topic_state(st, sizeof(st), "bedtime/start");
+        topic_cmd(cmd, sizeof(cmd), "bedtime/start");
+        discover_text("bedtime_start", "Bedtime starts", st, cmd, 5);
+
+        topic_state(st, sizeof(st), "bedtime/end");
+        topic_cmd(cmd, sizeof(cmd), "bedtime/end");
+        discover_text("bedtime_end", "Bedtime ends", st, cmd, 5);
+
+        topic_state(st, sizeof(st), "home_tz");
+        topic_cmd(cmd, sizeof(cmd), "home_tz");
+        discover_text("home_tz", "Home time zone", st, cmd, 47);
+
+        topic_state(st, sizeof(st), "home_tz_name");
+        topic_cmd(cmd, sizeof(cmd), "home_tz_name");
+        discover_text("home_tz_name", "Home time zone name", st, cmd, 39);
+
+        /* Config entities keep stable Contact N titles (not the person's name). */
+        for (int i = 0; i < s_slots; i++) {
+            const int n = i + 1;
+
+            snprintf(oid, sizeof(oid), "c%d_name", n);
+            snprintf(name, sizeof(name), "Contact %d name", n);
+            snprintf(st, sizeof(st), "%s/contact/%d/name", s_base, n);
+            snprintf(cmd, sizeof(cmd), "%s/contact/%d/name/set", s_base, n);
+            discover_text(oid, name, st, cmd, 31);
+
+            snprintf(oid, sizeof(oid), "c%d_number", n);
+            snprintf(name, sizeof(name), "Contact %d number", n);
+            snprintf(st, sizeof(st), "%s/contact/%d/number", s_base, n);
+            snprintf(cmd, sizeof(cmd), "%s/contact/%d/number/set", s_base, n);
+            discover_text(oid, name, st, cmd, 19);
+
+            snprintf(oid, sizeof(oid), "c%d_sched", n);
+            snprintf(name, sizeof(name), "Contact %d schedule", n);
+            snprintf(st, sizeof(st), "%s/contact/%d/schedule/enabled", s_base, n);
+            snprintf(cmd, sizeof(cmd), "%s/contact/%d/schedule/enabled/set", s_base, n);
+            discover_switch(oid, name, st, cmd);
+
+            snprintf(oid, sizeof(oid), "c%d_tz", n);
+            snprintf(name, sizeof(name), "Contact %d time zone", n);
+            snprintf(st, sizeof(st), "%s/contact/%d/schedule/tz", s_base, n);
+            snprintf(cmd, sizeof(cmd), "%s/contact/%d/schedule/tz/set", s_base, n);
+            discover_text(oid, name, st, cmd, 47);
+
+            snprintf(oid, sizeof(oid), "c%d_tzname", n);
+            snprintf(name, sizeof(name), "Contact %d time zone name", n);
+            snprintf(st, sizeof(st), "%s/contact/%d/schedule/tz_name", s_base, n);
+            snprintf(cmd, sizeof(cmd), "%s/contact/%d/schedule/tz_name/set", s_base, n);
+            discover_text(oid, name, st, cmd, 39);
+
+            for (int w = 0; w < CFG_MAX_WINDOWS; w++) {
+                snprintf(oid, sizeof(oid), "c%d_w%d", n, w + 1);
+                snprintf(name, sizeof(name), "Contact %d window %d", n, w + 1);
+                snprintf(st, sizeof(st), "%s/contact/%d/schedule/window/%d", s_base, n, w + 1);
+                snprintf(cmd, sizeof(cmd), "%s/contact/%d/schedule/window/%d/set", s_base, n, w + 1);
+                discover_text(oid, name, st, cmd, 24);
+            }
+        }
+    } else {
+        /* Leaving full mode: remove config entities from HA. */
+        undiscover_full_config(MQTT_MAX_SLOTS);
+    }
+
+    if (ct) {
+        mbedtls_platform_zeroize(ct, sizeof(cfg_contact_t) * CFG_MAX_CONTACTS);
+        free(ct);
+    }
+
     s_discovery_done = true;
-    ESP_LOGI(TAG, "HA discovery published (%d contact slots)", s_slots);
+    ESP_LOGI(TAG, "HA discovery published (%d slots, expose=%s)", s_slots, full ? "full" : "controls");
 }
 
 static void fmt_hhmm(char *out, size_t len, unsigned minute)
@@ -324,6 +408,7 @@ static void publish_states(void)
         return;
     }
     char topic[128], buf[48];
+    const bool full = mqtt_expose_mode() == CFG_MQTT_EXPOSE_FULL;
 
     pub(s_avail, "online", 1, true);
 
@@ -348,6 +433,11 @@ static void publish_states(void)
     const char *err = s_last_err[0] ? s_last_err : (r.failed && r.message[0] ? r.message : "");
     topic_state(topic, sizeof(topic), "last_error");
     pub(topic, err, 1, true);
+
+    if (!full) {
+        s_cfg_gen_seen = config_generation();
+        return;
+    }
 
     snprintf(buf, sizeof(buf), "%u", (unsigned)config_max_call_minutes());
     topic_state(topic, sizeof(topic), "max_call_min");
@@ -490,6 +580,55 @@ static void load_contacts(cfg_contact_t *ct)
     memcpy(ct, c->contacts, sizeof(cfg_contact_t) * CFG_MAX_CONTACTS);
     config_wipe(c);
     free(c);
+}
+
+/* Same rules as POST /api/call: availability windows apply; bedtime does not
+ * (parent testing from HA). Never honor a retained press. */
+static void handle_call_contact(int idx, bool retain)
+{
+    if (retain) {
+        ESP_LOGW(TAG, "ignoring retained call command (would replay after broker restart)");
+        return;
+    }
+    cfg_pins_t pins;
+    config_get_pins(&pins);
+    if (idx < 0 || idx >= CFG_MAX_CONTACTS || idx >= pins.count) {
+        set_err("No such button.");
+        publish_states();
+        return;
+    }
+    if (!wifi_is_connected() || !config_is_provisioned() || twilio_provision_running()) {
+        set_err("The phone is not ready to call yet.");
+        publish_states();
+        return;
+    }
+    if (sip_call_state() != CALL_IDLE) {
+        set_err("A call is already in progress.");
+        publish_states();
+        return;
+    }
+    if (secret_active()) {
+        set_err("The phone is recording a secret message right now.");
+        publish_states();
+        return;
+    }
+    cfg_contact_t ct;
+    if (!config_get_contact(idx, &ct) || !ct.number[0]) {
+        set_err("Nobody is set up on this button.");
+        publish_states();
+        return;
+    }
+    sched_state_t st;
+    schedule_eval(&ct.sched, &st);
+    if (!st.available) {
+        set_err("They are outside their available hours.");
+        publish_states();
+        return;
+    }
+    ESP_LOGI(TAG, "call contact %d from Home Assistant", idx);
+    s_last_err[0] = '\0';
+    sip_call_contact(idx);
+    publish_states();
 }
 
 static void handle_contact_cmd(int idx, const char *field, const char *payload)
@@ -637,6 +776,8 @@ static void handle_contact_cmd(int idx, const char *field, const char *payload)
     }
     save_contacts_copy(parsed, err, sizeof(err));
     free(parsed);
+    /* Name may have changed → refresh Call {name} discovery titles. */
+    publish_discovery();
     publish_states();
 }
 
@@ -708,6 +849,34 @@ static void on_command(const char *topic, int topic_len, const char *data, int d
         return;
     }
 
+    if (strncmp(path, "contact/", 8) == 0) {
+        int n = 0;
+        const char *p = path + 8;
+        while (isdigit((unsigned char)*p)) {
+            n = n * 10 + (*p - '0');
+            p++;
+        }
+        if (n < 1 || *p != '/') {
+            return;
+        }
+        const char *field = p + 1;
+        if (strcmp(field, "call") == 0) {
+            handle_call_contact(n - 1, retain);
+            return;
+        }
+        /* Contact config only in full expose mode. */
+        if (mqtt_expose_mode() != CFG_MQTT_EXPOSE_FULL) {
+            return;
+        }
+        handle_contact_cmd(n - 1, field, pbuf);
+        return;
+    }
+
+    /* Phone settings (bedtime, call length, TZ) only in full expose mode. */
+    if (mqtt_expose_mode() != CFG_MQTT_EXPOSE_FULL) {
+        return;
+    }
+
     if (strcmp(path, "max_call_min") == 0) {
         char err[80];
         unsigned m = (unsigned)atoi(pbuf);
@@ -740,19 +909,6 @@ static void on_command(const char *topic, int topic_len, const char *data, int d
         }
         publish_states();
         return;
-    }
-
-    if (strncmp(path, "contact/", 8) == 0) {
-        int n = 0;
-        const char *p = path + 8;
-        while (isdigit((unsigned char)*p)) {
-            n = n * 10 + (*p - '0');
-            p++;
-        }
-        if (n < 1 || *p != '/') {
-            return;
-        }
-        handle_contact_cmd(n - 1, p + 1, pbuf);
     }
 }
 
@@ -948,8 +1104,9 @@ static void manager_task(void *arg)
             pub(topic, err, 1, true);
         }
 
-        /* Local UI saved something: republish entity states. */
+        /* Local UI / cloud saved something: refresh Call {name} titles + states. */
         if (s_discovery_done && config_generation() != s_cfg_gen_seen) {
+            publish_discovery();
             publish_states();
         }
 

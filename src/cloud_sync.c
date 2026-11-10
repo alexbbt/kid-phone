@@ -118,8 +118,9 @@ static bool http_json(const char *method, const char *url, const char *bearer, c
         .crt_bundle_attach = esp_crt_bundle_attach,
         .event_handler = http_event,
         .user_data = &hr,
+        /* Roster + a few call events + status fit under 6 KiB. */
         .buffer_size = 2048,
-        .buffer_size_tx = 2048,
+        .buffer_size_tx = 6144,
     };
     if (strcmp(method, "GET") == 0) {
         cfg.method = HTTP_METHOD_GET;
@@ -168,53 +169,17 @@ static void iso_utc(int64_t ms, char *out, size_t len)
     strftime(out, len, "%Y-%m-%dT%H:%M:%SZ", &tm);
 }
 
-static bool refresh_tokens(cfg_cloud_t *cloud)
+/* 401 = revoked/invalid device token → clear credentials; local calling stays up. */
+static void on_auth_rejected(cfg_cloud_t *cloud)
 {
-    if (!cloud->refresh_token[0]) {
-        return false;
+    set_err("cloud auth rejected (re-pair)");
+    config_clear_cloud();
+    if (cloud) {
+        mbedtls_platform_zeroize(cloud->device_token, sizeof(cloud->device_token));
+        cloud->device_uuid[0] = '\0';
+        cloud->device_name[0] = '\0';
+        cloud->pair_code[0] = '\0';
     }
-    char url[160];
-    snprintf(url, sizeof(url), "%s/api/kid-phone/v1/token/refresh", cloud->base_url);
-    cJSON *req = cJSON_CreateObject();
-    cJSON_AddStringToObject(req, "refresh_token", cloud->refresh_token);
-    char *body = cJSON_PrintUnformatted(req);
-    cJSON_Delete(req);
-    if (!body) {
-        return false;
-    }
-    char resp[1024];
-    int status = 0;
-    bool ok = http_json("POST", url, NULL, body, resp, sizeof(resp), &status);
-    free(body);
-    if (!ok) {
-        if (status == 401) {
-            set_err("refresh rejected (re-pair)");
-            config_clear_cloud();
-        } else {
-            set_err("token refresh failed");
-        }
-        return false;
-    }
-    cJSON *j = cJSON_Parse(resp);
-    if (!j) {
-        set_err("bad refresh JSON");
-        return false;
-    }
-    const cJSON *at = cJSON_GetObjectItem(j, "access_token");
-    const cJSON *rt = cJSON_GetObjectItem(j, "refresh_token");
-    const cJSON *uuid = cJSON_GetObjectItem(j, "device_uuid");
-    bool saved = false;
-    if (cJSON_IsString(at) && cJSON_IsString(rt)) {
-        const char *id = (cJSON_IsString(uuid) && uuid->valuestring[0]) ? uuid->valuestring : cloud->device_uuid;
-        saved = config_set_cloud_tokens(id, at->valuestring, rt->valuestring) == ESP_OK;
-    }
-    cJSON_Delete(j);
-    if (!saved) {
-        set_err("could not store refreshed tokens");
-        return false;
-    }
-    config_get_cloud(cloud);
-    return true;
 }
 
 static bool apply_schedule_cmd(const cJSON *payload)
@@ -255,8 +220,15 @@ static bool apply_schedule_cmd(const cJSON *payload)
         for (int i = 0; i < n; i++) {
             const cJSON *w = cJSON_GetArrayItem(wins, i);
             const cJSON *days = cJSON_GetObjectItem(w, "days");
+            /* App sends start_min/end_min; accept start/end as aliases. */
             const cJSON *sm = cJSON_GetObjectItem(w, "start_min");
+            if (!cJSON_IsNumber(sm)) {
+                sm = cJSON_GetObjectItem(w, "start");
+            }
             const cJSON *em = cJSON_GetObjectItem(w, "end_min");
+            if (!cJSON_IsNumber(em)) {
+                em = cJSON_GetObjectItem(w, "end");
+            }
             if (cJSON_IsNumber(days)) {
                 s->win[i].days = (uint8_t)(days->valueint & 0x7f);
             }
@@ -272,38 +244,11 @@ static bool apply_schedule_cmd(const cJSON *payload)
     bool ok = false;
     if (!why) {
         ok = config_set_contacts(cfg->contacts) == ESP_OK;
-        /* MQTT HA watches config_generation() and republishes states. */
+        /* MQTT HA watches config_generation() and republishes Call titles. */
     }
     config_wipe(cfg);
     free(cfg);
     return ok;
-}
-
-static bool apply_bedtime_cmd(const cJSON *payload)
-{
-    cfg_bedtime_t b;
-    memset(&b, 0, sizeof(b));
-    b.enabled = cJSON_IsTrue(cJSON_GetObjectItem(payload, "enabled"));
-    const cJSON *sm = cJSON_GetObjectItem(payload, "start_min");
-    const cJSON *em = cJSON_GetObjectItem(payload, "end_min");
-    if (!cJSON_IsNumber(sm) || !cJSON_IsNumber(em)) {
-        return false;
-    }
-    b.start_min = (uint16_t)(sm->valueint % 1440);
-    b.end_min = (uint16_t)(em->valueint % 1440);
-    const cJSON *tz = cJSON_GetObjectItem(payload, "tz");
-    const cJSON *tzn = cJSON_GetObjectItem(payload, "tz_name");
-    if (cJSON_IsString(tz)) {
-        strlcpy(b.tz, tz->valuestring, sizeof(b.tz));
-    }
-    if (cJSON_IsString(tzn)) {
-        strlcpy(b.tz_name, tzn->valuestring, sizeof(b.tz_name));
-    }
-    const char *why = schedule_bedtime_validate(&b);
-    if (why) {
-        return false;
-    }
-    return config_set_bedtime(&b) == ESP_OK;
 }
 
 static void ack_command(cfg_cloud_t *cloud, int id, bool ok, const char *error)
@@ -315,7 +260,6 @@ static void ack_command(cfg_cloud_t *cloud, int id, bool ok, const char *error)
     if (error) {
         cJSON_AddStringToObject(req, "error", error);
     }
-    cJSON_AddNumberToObject(req, "reported_config_generation", config_generation());
     char *body = cJSON_PrintUnformatted(req);
     cJSON_Delete(req);
     if (!body) {
@@ -323,9 +267,9 @@ static void ack_command(cfg_cloud_t *cloud, int id, bool ok, const char *error)
     }
     char resp[256];
     int status = 0;
-    if (!http_json("POST", url, cloud->access_token, body, resp, sizeof(resp), &status) && status == 401) {
-        if (refresh_tokens(cloud)) {
-            http_json("POST", url, cloud->access_token, body, resp, sizeof(resp), &status);
+    if (!http_json("POST", url, cloud->device_token, body, resp, sizeof(resp), &status)) {
+        if (status == 401) {
+            on_auth_rejected(cloud);
         }
     }
     free(body);
@@ -337,22 +281,20 @@ static void pull_commands(cfg_cloud_t *cloud)
     snprintf(url, sizeof(url), "%s/api/kid-phone/v1/commands", cloud->base_url);
     char resp[4096];
     int status = 0;
-    if (!http_json("GET", url, cloud->access_token, NULL, resp, sizeof(resp), &status)) {
-        if (status == 401 && refresh_tokens(cloud)) {
-            if (!http_json("GET", url, cloud->access_token, NULL, resp, sizeof(resp), &status)) {
-                set_err("commands pull failed");
-                return;
-            }
+    if (!http_json("GET", url, cloud->device_token, NULL, resp, sizeof(resp), &status)) {
+        if (status == 401) {
+            on_auth_rejected(cloud);
         } else {
             set_err("commands pull failed");
-            return;
         }
+        return;
     }
     cJSON *j = cJSON_Parse(resp);
     if (!j) {
         set_err("bad commands JSON");
         return;
     }
+    /* config_revision on the response is informational only. */
     const cJSON *cmds = cJSON_GetObjectItem(j, "commands");
     if (cJSON_IsArray(cmds)) {
         const int n = cJSON_GetArraySize(cmds);
@@ -371,13 +313,11 @@ static void pull_commands(cfg_cloud_t *cloud)
                 if (!ok) {
                     err = "schedule_apply_failed";
                 }
-            } else if (strcmp(type->valuestring, "set_bedtime") == 0) {
-                ok = apply_bedtime_cmd(payload);
-                if (!ok) {
-                    err = "bedtime_apply_failed";
-                }
             } else {
                 err = "unknown_command";
+            }
+            if (!cloud->device_token[0]) {
+                break; /* revoked mid-loop */
             }
             ack_command(cloud, id_j->valueint, ok, err);
         }
@@ -385,16 +325,106 @@ static void pull_commands(cfg_cloud_t *cloud)
     cJSON_Delete(j);
 }
 
+static void add_status_object(cJSON *parent, const char *key)
+{
+    cJSON *st = key ? cJSON_AddObjectToObject(parent, key) : parent;
+    cJSON_AddStringToObject(st, "firmware_version", esp_app_get_description()->version);
+    char ssid[33];
+    int rssi = 0;
+    if (wifi_current(ssid, sizeof(ssid), &rssi)) {
+        cJSON_AddStringToObject(st, "wifi_ssid", ssid);
+        cJSON_AddNumberToObject(st, "wifi_rssi", rssi);
+    }
+    cJSON_AddNumberToObject(st, "uptime_seconds", (double)(esp_timer_get_time() / 1000000ULL));
+    if (s_last_error[0]) {
+        cJSON_AddStringToObject(st, "last_sync_error", s_last_error);
+    }
+}
+
+/* Never put a full E.164 in JSON. "+15551234567" → "+1•••4567". */
+static void mask_e164(const char *num, char *out, size_t cap)
+{
+    if (!out || cap < 8) {
+        if (out && cap) {
+            out[0] = '\0';
+        }
+        return;
+    }
+    out[0] = '\0';
+    if (!num || !num[0]) {
+        return;
+    }
+    size_t n = strlen(num);
+    int ndig = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (num[i] >= '0' && num[i] <= '9') {
+            ndig++;
+        }
+    }
+    if (ndig < 4) {
+        strlcpy(out, "••••", cap);
+        return;
+    }
+    char prefix[4];
+    int pi = 0;
+    const char *p = num;
+    if (*p == '+') {
+        prefix[pi++] = *p++;
+        while (*p && (*p < '0' || *p > '9')) {
+            p++;
+        }
+        if (*p >= '0' && *p <= '9') {
+            prefix[pi++] = *p;
+        }
+    }
+    prefix[pi] = '\0';
+    char last[5];
+    int li = 4;
+    last[4] = '\0';
+    for (int i = (int)n - 1; i >= 0 && li > 0; i--) {
+        if (num[i] >= '0' && num[i] <= '9') {
+            last[--li] = num[i];
+        }
+    }
+    snprintf(out, cap, "%s•••%s", prefix, last + li);
+}
+
+/* Slot roster for the Bell-Towne manage UI (names + masked numbers only). */
+static void add_contacts_array(cJSON *root)
+{
+    cJSON *arr = cJSON_AddArrayToObject(root, "contacts");
+    if (!arr) {
+        return;
+    }
+    for (int i = 0; i < CFG_MAX_CONTACTS; i++) {
+        cfg_contact_t c;
+        (void)config_get_contact(i, &c);
+        const bool used = c.number[0] || c.name[0] || c.secret != CFG_SECRET_OFF;
+        if (!used) {
+            mbedtls_platform_zeroize(&c, sizeof(c));
+            continue;
+        }
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddNumberToObject(o, "slot", i);
+        if (c.name[0]) {
+            cJSON_AddStringToObject(o, "name", c.name);
+        } else {
+            cJSON_AddStringToObject(o, "name", "");
+        }
+        if (c.number[0]) {
+            char masked[24];
+            mask_e164(c.number, masked, sizeof(masked));
+            if (masked[0]) {
+                cJSON_AddStringToObject(o, "number_masked", masked);
+            }
+        }
+        cJSON_AddItemToArray(arr, o);
+        mbedtls_platform_zeroize(&c, sizeof(c));
+    }
+}
+
 static void push_events(cfg_cloud_t *cloud)
 {
-    xSemaphoreTake(s_lock, portMAX_DELAY);
-    if (s_log_count == 0) {
-        xSemaphoreGive(s_lock);
-        /* Still push a status heartbeat. */
-    } else {
-        xSemaphoreGive(s_lock);
-    }
-
     cJSON *root = cJSON_CreateObject();
     cJSON *events = cJSON_AddArrayToObject(root, "events");
     char kept_ids[APP_CLOUD_LOG_CAPACITY][40];
@@ -427,19 +457,8 @@ static void push_events(cfg_cloud_t *cloud)
     }
     xSemaphoreGive(s_lock);
 
-    cJSON *st = cJSON_AddObjectToObject(root, "status");
-    cJSON_AddStringToObject(st, "firmware_version", esp_app_get_description()->version);
-    char ssid[33];
-    int rssi = 0;
-    if (wifi_current(ssid, sizeof(ssid), &rssi)) {
-        cJSON_AddStringToObject(st, "wifi_ssid", ssid);
-        cJSON_AddNumberToObject(st, "wifi_rssi", rssi);
-    }
-    cJSON_AddNumberToObject(st, "uptime_seconds", (double)(esp_timer_get_time() / 1000000ULL));
-    cJSON_AddNumberToObject(st, "config_generation", config_generation());
-    if (s_last_error[0]) {
-        cJSON_AddStringToObject(st, "last_sync_error", s_last_error);
-    }
+    add_status_object(root, "status");
+    add_contacts_array(root);
 
     char *body = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -451,13 +470,14 @@ static void push_events(cfg_cloud_t *cloud)
     snprintf(url, sizeof(url), "%s/api/kid-phone/v1/events", cloud->base_url);
     char resp[512];
     int status = 0;
-    bool ok = http_json("POST", url, cloud->access_token, body, resp, sizeof(resp), &status);
-    if (!ok && status == 401 && refresh_tokens(cloud)) {
-        ok = http_json("POST", url, cloud->access_token, body, resp, sizeof(resp), &status);
-    }
+    bool ok = http_json("POST", url, cloud->device_token, body, resp, sizeof(resp), &status);
     free(body);
     if (!ok) {
-        set_err("events push failed");
+        if (status == 401) {
+            on_auth_rejected(cloud);
+        } else {
+            set_err("events push failed");
+        }
         return;
     }
 
@@ -470,7 +490,6 @@ static void push_events(cfg_cloud_t *cloud)
             }
         }
     }
-    /* Repack */
     log_event_t tmp[APP_CLOUD_LOG_CAPACITY];
     int n = 0;
     for (int i = 0; i < APP_CLOUD_LOG_CAPACITY; i++) {
@@ -511,6 +530,9 @@ static void poll_pairing(cfg_cloud_t *cloud)
         if (status == 410) {
             set_err("pairing code expired");
             config_set_cloud_pairing_code("");
+        } else if (status == 409) {
+            set_err("pairing already finished; show a new code");
+            config_set_cloud_pairing_code("");
         }
         return;
     }
@@ -519,15 +541,22 @@ static void poll_pairing(cfg_cloud_t *cloud)
         return;
     }
     const cJSON *st = cJSON_GetObjectItem(j, "status");
-    if (cJSON_IsString(st) && strcmp(st->valuestring, "paired") == 0) {
+    if (cJSON_IsString(st) && strcmp(st->valuestring, "waiting") == 0) {
+        /* Owner has not claimed the code yet. */
+    } else if (cJSON_IsString(st) && strcmp(st->valuestring, "paired") == 0) {
         const cJSON *uuid = cJSON_GetObjectItem(j, "device_uuid");
-        const cJSON *at = cJSON_GetObjectItem(j, "access_token");
-        const cJSON *rt = cJSON_GetObjectItem(j, "refresh_token");
-        if (cJSON_IsString(uuid) && cJSON_IsString(at) && cJSON_IsString(rt)) {
-            if (config_set_cloud_tokens(uuid->valuestring, at->valuestring, rt->valuestring) == ESP_OK) {
+        const cJSON *tok = cJSON_GetObjectItem(j, "device_token");
+        const cJSON *base = cJSON_GetObjectItem(j, "base_url");
+        const cJSON *name = cJSON_GetObjectItem(j, "device_name");
+        if (cJSON_IsString(uuid) && cJSON_IsString(tok) && uuid->valuestring[0] && tok->valuestring[0]) {
+            const char *url_in = (cJSON_IsString(base) && base->valuestring[0]) ? base->valuestring : NULL;
+            const char *name_in = (cJSON_IsString(name) && name->valuestring[0]) ? name->valuestring : NULL;
+            if (config_set_cloud_device(uuid->valuestring, tok->valuestring, url_in, name_in) == ESP_OK) {
                 ESP_LOGI(TAG, "paired with Bell-Towne app");
                 set_err(NULL);
                 s_last_ok_ms = now_ms();
+            } else {
+                set_err("could not store device token");
             }
         }
     }
@@ -545,18 +574,14 @@ static void sync_once(void)
         poll_pairing(&cloud);
         config_get_cloud(&cloud);
     }
-    if (!cloud.device_uuid[0] || !cloud.refresh_token[0]) {
+    if (!cloud.device_uuid[0] || !cloud.device_token[0]) {
         mbedtls_platform_zeroize(&cloud, sizeof(cloud));
         return;
     }
-    if (!cloud.access_token[0]) {
-        if (!refresh_tokens(&cloud)) {
-            mbedtls_platform_zeroize(&cloud, sizeof(cloud));
-            return;
-        }
-    }
     push_events(&cloud);
-    pull_commands(&cloud);
+    if (cloud.device_token[0]) {
+        pull_commands(&cloud);
+    }
     mbedtls_platform_zeroize(&cloud, sizeof(cloud));
 }
 
@@ -603,7 +628,6 @@ void cloud_sync_log_event(int contact_slot, const char *contact_name, const char
     }
     xSemaphoreTake(s_lock, portMAX_DELAY);
     if (s_log_count >= APP_CLOUD_LOG_CAPACITY) {
-        /* Drop oldest. */
         s_log[s_log_head].used = false;
         s_log_head = (s_log_head + 1) % APP_CLOUD_LOG_CAPACITY;
         s_log_count--;
@@ -647,15 +671,23 @@ esp_err_t cloud_sync_pair_begin(char *code_out, size_t code_len)
     char *body = cJSON_PrintUnformatted(req);
     cJSON_Delete(req);
     if (!body) {
+        mbedtls_platform_zeroize(&cloud, sizeof(cloud));
         return ESP_ERR_NO_MEM;
     }
     char resp[512];
     int status = 0;
     bool ok = http_json("POST", url, NULL, body, resp, sizeof(resp), &status);
     free(body);
+    const bool was_paired = cloud.device_uuid[0] && cloud.device_token[0];
+    mbedtls_platform_zeroize(&cloud, sizeof(cloud));
     if (!ok) {
         set_err("pair begin failed");
         return ESP_FAIL;
+    }
+    /* Re-pair: drop the old device token so poll_pairing can complete and the
+     * setup page shows Waiting + the code (not "still Paired"). */
+    if (was_paired) {
+        (void)config_clear_cloud();
     }
     if (config_set_cloud_pairing_code(code) != ESP_OK) {
         return ESP_FAIL;
@@ -681,7 +713,7 @@ void cloud_sync_status(cloud_sync_status_t *out)
     memset(out, 0, sizeof(*out));
     cfg_cloud_t cloud;
     config_get_cloud(&cloud);
-    out->paired = cloud.device_uuid[0] && cloud.refresh_token[0];
+    out->paired = cloud.device_uuid[0] && cloud.device_token[0];
     out->pairing = cloud.pair_code[0] && !out->paired;
     strlcpy(out->pair_code, cloud.pair_code, sizeof(out->pair_code));
     strlcpy(out->device_uuid, cloud.device_uuid, sizeof(out->device_uuid));

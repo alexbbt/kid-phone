@@ -225,6 +225,7 @@ static void mqtt_defaults(cfg_mqtt_t *m)
 {
     memset(m, 0, sizeof(*m));
     m->port = 1883;
+    m->expose = CFG_MQTT_EXPOSE_FULL;
 }
 
 static void cloud_defaults(cfg_cloud_t *c)
@@ -241,9 +242,28 @@ static void load_cloud(nvs_handle_t h, cfg_cloud_t *c)
         strlcpy(c->base_url, APP_CLOUD_BASE_URL_DEFAULT, sizeof(c->base_url));
     }
     get_str(h, "cloud_uuid", c->device_uuid, sizeof(c->device_uuid));
-    get_str(h, "cloud_atok", c->access_token, sizeof(c->access_token));
-    get_str(h, "cloud_rtok", c->refresh_token, sizeof(c->refresh_token));
+    get_str(h, "cloud_dtok", c->device_token, sizeof(c->device_token));
+    get_str(h, "cloud_name", c->device_name, sizeof(c->device_name));
     get_str(h, "cloud_code", c->pair_code, sizeof(c->pair_code));
+    /* Dual-token era (cloud_atok / cloud_rtok) is obsolete: without a device
+     * token the phone is not paired for the current API. */
+    if (!c->device_token[0]) {
+        c->device_uuid[0] = '\0';
+        c->device_name[0] = '\0';
+    }
+}
+
+/* Drop legacy access/refresh keys if they linger from older firmware. */
+static void scrub_legacy_cloud_keys(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) {
+        return;
+    }
+    erase_key(h, "cloud_atok");
+    erase_key(h, "cloud_rtok");
+    nvs_commit(h);
+    nvs_close(h);
 }
 
 /* Secret settings: every key optional (firmware before 0.6.0 wrote none). */
@@ -285,6 +305,10 @@ static void load_mqtt(nvs_handle_t h, cfg_mqtt_t *m)
     }
     get_str(h, "mqtt_user", m->user, sizeof(m->user));
     get_str(h, "mqtt_pass", m->pass, sizeof(m->pass));
+    uint8_t ex = CFG_MQTT_EXPOSE_FULL;
+    if (nvs_get_u8(h, "mqtt_expose", &ex) == ESP_OK && ex <= CFG_MQTT_EXPOSE_FULL) {
+        m->expose = ex;
+    }
 }
 
 static void load(void)
@@ -662,6 +686,7 @@ void config_store_init(void)
     load();
     unlock();
     migrate_legacy_wifi();
+    scrub_legacy_cloud_keys();
     seed_from_secrets();
 
     const int nw = config_wifi_count();
@@ -1200,15 +1225,20 @@ esp_err_t config_set_mqtt(const cfg_mqtt_t *in, bool keep_pass)
     if (keep_pass && nm.host[0]) {
         memcpy(nm.pass, s_cfg.mqtt.pass, sizeof(nm.pass));
     }
+    if (nm.expose > CFG_MQTT_EXPOSE_FULL) {
+        nm.expose = CFG_MQTT_EXPOSE_FULL;
+    }
     err |= put_str(h, "mqtt_host", nm.host);
     if (nm.host[0]) {
         err |= nvs_set_u16(h, "mqtt_port", nm.port);
         err |= put_str(h, "mqtt_user", nm.user);
         err |= put_str(h, "mqtt_pass", nm.pass);
+        err |= nvs_set_u8(h, "mqtt_expose", nm.expose);
     } else {
         err |= erase_key(h, "mqtt_port");
         err |= erase_key(h, "mqtt_user");
         err |= erase_key(h, "mqtt_pass");
+        err |= erase_key(h, "mqtt_expose");
     }
     if (err == ESP_OK) {
         err = nvs_commit(h);
@@ -1245,7 +1275,7 @@ void config_get_cloud(cfg_cloud_t *out)
 bool config_cloud_paired(void)
 {
     lock();
-    bool ok = s_cloud.device_uuid[0] && s_cloud.refresh_token[0];
+    bool ok = s_cloud.device_uuid[0] && s_cloud.device_token[0];
     unlock();
     return ok;
 }
@@ -1301,13 +1331,21 @@ esp_err_t config_set_cloud_pairing_code(const char *code)
     return err == ESP_OK ? ESP_OK : ESP_FAIL;
 }
 
-esp_err_t config_set_cloud_tokens(const char *device_uuid, const char *access, const char *refresh)
+esp_err_t config_set_cloud_device(const char *device_uuid, const char *device_token, const char *base_url,
+                                  const char *device_name)
 {
-    if (!device_uuid || !device_uuid[0] || !access || !access[0] || !refresh || !refresh[0]) {
+    if (!device_uuid || !device_uuid[0] || !device_token || !device_token[0]) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (strlen(device_uuid) >= sizeof(s_cloud.device_uuid) || strlen(access) >= sizeof(s_cloud.access_token) ||
-        strlen(refresh) >= sizeof(s_cloud.refresh_token)) {
+    if (strlen(device_uuid) >= sizeof(s_cloud.device_uuid) || strlen(device_token) >= sizeof(s_cloud.device_token)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (base_url && base_url[0]) {
+        if (strlen(base_url) >= sizeof(s_cloud.base_url) || strncmp(base_url, "https://", 8) != 0) {
+            return ESP_ERR_INVALID_ARG;
+        }
+    }
+    if (device_name && strlen(device_name) >= sizeof(s_cloud.device_name)) {
         return ESP_ERR_INVALID_ARG;
     }
     nvs_handle_t h;
@@ -1317,13 +1355,27 @@ esp_err_t config_set_cloud_tokens(const char *device_uuid, const char *access, c
     }
     lock();
     strlcpy(s_cloud.device_uuid, device_uuid, sizeof(s_cloud.device_uuid));
-    strlcpy(s_cloud.access_token, access, sizeof(s_cloud.access_token));
-    strlcpy(s_cloud.refresh_token, refresh, sizeof(s_cloud.refresh_token));
+    strlcpy(s_cloud.device_token, device_token, sizeof(s_cloud.device_token));
+    if (base_url && base_url[0]) {
+        strlcpy(s_cloud.base_url, base_url, sizeof(s_cloud.base_url));
+    }
+    if (device_name && device_name[0]) {
+        strlcpy(s_cloud.device_name, device_name, sizeof(s_cloud.device_name));
+    } else {
+        s_cloud.device_name[0] = '\0';
+    }
     s_cloud.pair_code[0] = '\0';
     err |= put_str(h, "cloud_uuid", s_cloud.device_uuid);
-    err |= put_str(h, "cloud_atok", s_cloud.access_token);
-    err |= put_str(h, "cloud_rtok", s_cloud.refresh_token);
+    err |= put_str(h, "cloud_dtok", s_cloud.device_token);
+    err |= put_str(h, "cloud_url", s_cloud.base_url);
+    if (s_cloud.device_name[0]) {
+        err |= put_str(h, "cloud_name", s_cloud.device_name);
+    } else {
+        err |= erase_key(h, "cloud_name");
+    }
     err |= erase_key(h, "cloud_code");
+    err |= erase_key(h, "cloud_atok");
+    err |= erase_key(h, "cloud_rtok");
     if (err == ESP_OK) {
         err = nvs_commit(h);
     }
@@ -1341,11 +1393,13 @@ esp_err_t config_clear_cloud(void)
         return err;
     }
     lock();
-    mbedtls_platform_zeroize(s_cloud.access_token, sizeof(s_cloud.access_token));
-    mbedtls_platform_zeroize(s_cloud.refresh_token, sizeof(s_cloud.refresh_token));
+    mbedtls_platform_zeroize(s_cloud.device_token, sizeof(s_cloud.device_token));
     s_cloud.device_uuid[0] = '\0';
+    s_cloud.device_name[0] = '\0';
     s_cloud.pair_code[0] = '\0';
     err |= erase_key(h, "cloud_uuid");
+    err |= erase_key(h, "cloud_dtok");
+    err |= erase_key(h, "cloud_name");
     err |= erase_key(h, "cloud_atok");
     err |= erase_key(h, "cloud_rtok");
     err |= erase_key(h, "cloud_code");

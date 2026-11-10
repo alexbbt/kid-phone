@@ -11,7 +11,7 @@ FILE(GLOB_RECURSE app_sources ${CMAKE_SOURCE_DIR}/src/*.c)
 # Both lists must match board_build.embed_* in platformio.ini.
 idf_component_register(SRCS ${app_sources}
                        INCLUDE_DIRS "."
-                       EMBED_TXTFILES "setup_page.html" "${CMAKE_SOURCE_DIR}/twilio/voice.js"
+                       EMBED_TXTFILES "setup_page.html" "favicon.svg" "${CMAKE_SOURCE_DIR}/twilio/voice.js"
                        EMBED_FILES "prompts/time_up.pcm" "prompts/unavailable.pcm" "prompts/no_answer.pcm"
                                    "prompts/no_wifi.pcm" "prompts/not_ready.pcm" "prompts/cant_call.pcm"
                                    "prompts/sleep_time.pcm" "prompts/secret_start.pcm" "prompts/secret_sent.pcm"

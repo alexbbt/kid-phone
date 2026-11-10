@@ -56,10 +56,13 @@
  *   mqtt_user, mqtt_pass       (missing = 1883), optional login; the password is never sent
  *                              back to the setup page (has_password only). Twilio Auth Token,
  *                              SIP password and restricted key secret are never published.
+ *   mqtt_expose                u8, CFG_MQTT_EXPOSE_*: what HA sees (missing = full, so phones
+ *                              that already discovered every entity keep that until changed)
  *   cloud_url                  Bell-Towne app base URL (default https://app.bell-towne.com)
  *   cloud_uuid                 device UUID from pairing (empty = not paired)
- *   cloud_atok, cloud_rtok     access + refresh tokens (never returned to the setup page)
- *   cloud_code                 pairing code while waiting for a manager to claim it
+ *   cloud_dtok                 long-lived device token (Bearer; never returned to the setup page)
+ *   cloud_name                 optional device display name from pairing
+ *   cloud_code                 pairing code while waiting for the owner to claim it
  * Every secret key is optional: a phone set up before 0.6.0 has none, and
  * missing keys mean the feature is off. Empty values are erased, not written
  * (24 slots of empty keys would fill the small NVS partition).
@@ -162,6 +165,10 @@ typedef struct {
     uint16_t max_s;
 } cfg_secret_opts_t;
 
+/* What Home Assistant MQTT discovery exposes. */
+#define CFG_MQTT_EXPOSE_CONTROLS 0 /* call buttons, hang-up, diagnostics only */
+#define CFG_MQTT_EXPOSE_FULL     1 /* + contacts, schedules, bedtime, call length */
+
 /* Home Assistant MQTT broker. enabled = host non-empty (MQTT off until set).
  * pass never leaves the phone except into the MQTT client. */
 typedef struct {
@@ -169,6 +176,7 @@ typedef struct {
     uint16_t port;   /* 1..65535, default 1883 */
     char user[64];
     char pass[64];   /* never logged or returned to the setup page */
+    uint8_t expose;  /* CFG_MQTT_EXPOSE_*; default FULL when key missing */
 } cfg_mqtt_t;
 
 /* Which GPIO is each button and its light. Buttons fill slots 0..count-1
@@ -327,13 +335,14 @@ void config_get_mqtt(cfg_mqtt_t *out);
 bool config_mqtt_enabled(void);
 esp_err_t config_set_mqtt(const cfg_mqtt_t *m, bool keep_pass);
 
-/* Bell-Towne cloud pairing credentials. Tokens never leave the phone except
- * on HTTPS Authorization headers. get_cloud copies tokens (wipe when done). */
+/* Bell-Towne cloud pairing credentials. The device token never leaves the
+ * phone except on HTTPS Authorization headers. get_cloud copies it (wipe
+ * when done). */
 typedef struct {
     char base_url[96];
     char device_uuid[40];
-    char access_token[96];
-    char refresh_token[128];
+    char device_token[80]; /* long-lived; hashed server-side */
+    char device_name[40];  /* optional label from the app */
     char pair_code[8];
 } cfg_cloud_t;
 
@@ -341,7 +350,10 @@ void config_get_cloud(cfg_cloud_t *out);
 bool config_cloud_paired(void);
 esp_err_t config_set_cloud_url(const char *url);
 esp_err_t config_set_cloud_pairing_code(const char *code);
-esp_err_t config_set_cloud_tokens(const char *device_uuid, const char *access, const char *refresh);
+/* Store pairing result. base_url / device_name may be NULL or empty to keep
+ * the current URL / clear the name. */
+esp_err_t config_set_cloud_device(const char *device_uuid, const char *device_token,
+                                  const char *base_url, const char *device_name);
 esp_err_t config_clear_cloud(void);
 
 /* Secret mode of slot idx (CFG_SECRET_*), and its email into email (may be

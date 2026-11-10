@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Kid Phone Setup</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <style>
 :root {
   --bg: #f6f4ef; --card: #ffffff; --ink: #1f2328; --muted: #5f6670; --line: #e3dfd6;
@@ -350,6 +351,12 @@ footer { color: var(--muted); font-size: 14px; text-align: center; margin-top: 2
       <button type="button" class="secondary mini" id="b-mqtt-show">Show</button>
     </div>
     <p class="hint" id="mqtt-pass-hint">Leave blank to keep a saved password. The password is never shown again after you save.</p>
+    <label for="mqtt-expose">What Home Assistant sees</label>
+    <select id="mqtt-expose">
+      <option value="controls">Call buttons only (status, Call Grandma, hang up)</option>
+      <option value="full">Full setup (also contacts, schedules, bedtime)</option>
+    </select>
+    <p class="hint">Call buttons always use the person’s name (Call Grandma). Contact name/number fields stay labeled Contact 1, Contact 2, … so renaming someone does not churn entities.</p>
     <button type="button" id="b-mqtt">Save</button>
     <p class="hint" id="mqtt-msg"></p>
   </section>
@@ -951,7 +958,10 @@ function render() {
     return li;
   }));
   show("p-err", s.state === "failed");
-  if (s.state === "failed") { $("p-err-t").textContent = s.error; $("p-err-h").textContent = " " + s.hint; }
+  if (s.state === "failed") {
+    $("p-err-t").textContent = s.error || "Setup did not finish.";
+    $("p-err-h").textContent = " " + (s.hint || "Press Run setup again. If it keeps failing, restart the phone first.");
+  }
 
   const mode = !t.provisioned ? "setup" : twMode;
   show("c-tw", !running && !!mode);
@@ -965,7 +975,7 @@ function render() {
   $("b-save").disabled = running;
 
   show("c-ready", t.provisioned && !running);
-  const cs2 = st.call.state, idle = cs2 === "IDLE";
+  const cs2 = st.call.state, idle = cs2 === "idle";
   const cb = $("call-buttons");
   cb.replaceChildren(...cs.map((c, i) => {
     if (!c.number) return "";
@@ -976,7 +986,7 @@ function render() {
   }));
   $("b-hang").disabled = idle;
   const who = st.call.contact >= 0 && cs[st.call.contact] ? cs[st.call.contact].name : "";
-  const words = {IDLE: "", CALLING: "Calling " + who + "...", RINGING: "Ringing...", IN_CALL: "Connected. Talk on the handset.", ENDING: "Hanging up..."};
+  const words = {idle: "", calling: "Calling " + who + "...", ringing: "Ringing...", in_call: "Connected. Talk on the handset.", ending: "Hanging up..."};
   if (!idle || watchSeq !== null) $("call-state").textContent = words[cs2] || cs2;
   checkCallResult();
 }
@@ -984,7 +994,7 @@ function render() {
 function checkCallResult() {
   if (watchSeq === null) return;
   const r = st.call.last;
-  if (r.seq === watchSeq || st.call.state !== "IDLE") return;
+  if (r.seq === watchSeq || st.call.state !== "idle") return;
   watchSeq = null;
   if (r.kind === "timeup") {
     /* Not a problem: the phone hung up at the call length limit. */
@@ -1201,7 +1211,7 @@ async function poll() {
   } catch (e) {}
   if (resetting) return;
   const sec = st && st.secret;
-  const busy = st && (st.setup.state === "running" || st.call.state !== "IDLE" || watchSeq !== null || secTestSeq !== null ||
+  const busy = st && (st.setup.state === "running" || st.call.state !== "idle" || watchSeq !== null || secTestSeq !== null ||
     (sec && (sec.recording || ["queued", "sending"].includes(sec.last.state))));
   pollTimer = setTimeout(poll, busy ? 1000 : 3000);
 }
@@ -1671,12 +1681,13 @@ function loadMqtt(m) {
   $("mqtt-pass-hint").textContent = m.has_password
     ? "A password is saved. Leave blank to keep it, or type a new one."
     : "Leave blank if the broker has no password. The password is never shown again after you save.";
+  $("mqtt-expose").value = m.expose === "controls" ? "controls" : "full";
   mqttDirty = false;
 }
 
 function renderMqtt() {
   const m = st.mqtt || {};
-  const sig = JSON.stringify([m.host, m.port, m.user, m.has_password, m.state, m.connected]);
+  const sig = JSON.stringify([m.host, m.port, m.user, m.has_password, m.expose, m.state, m.connected]);
   if (sig !== mqttSig && !mqttDirty) { loadMqtt(m); mqttSig = sig; }
   const [text, cls] = mqttStateLine(m);
   setText("mqtt-status", text, cls);
@@ -1686,19 +1697,21 @@ function renderMqtt() {
 function renderCloud() {
   const c = st.cloud || {};
   let text = "Not paired", cls = "";
-  if (c.paired) { text = "Paired"; cls = "good"; }
-  else if (c.pairing && c.pair_code) { text = "Waiting (" + c.pair_code + ")"; cls = "bad"; }
+  if (c.pairing && c.pair_code) { text = "Waiting (" + c.pair_code + ")"; cls = "bad"; }
+  else if (c.paired) { text = "Paired"; cls = "good"; }
   else if (c.last_error) { text = "Error"; cls = "bad"; }
   setText("s-cloud", text, cls);
-  setText("cloud-status", c.paired
-    ? "Paired with Bell-Towne" + (c.device_uuid ? " (" + c.device_uuid.slice(0, 8) + "…)" : "") +
-      (c.last_error ? ". Last sync note: " + c.last_error : ".")
-    : (c.pairing ? "Waiting for a manager to enter the code in the app." :
-      "Not paired. Show a pairing code, then enter it in the Bell-Towne Kid Phone app."), cls);
-  show("cloud-code-box", !!(c.pairing && c.pair_code));
+  setText("cloud-status", c.pairing && c.pair_code
+    ? "Waiting for the owner to enter the code in the app."
+    : (c.paired
+      ? "Paired with Bell-Towne" + (c.device_uuid ? " (" + c.device_uuid.slice(0, 8) + "…)" : "") +
+        (c.last_error ? ". Last sync note: " + c.last_error : ".")
+      : "Not paired. Show a pairing code, then enter it in the Bell-Towne Kid Phone app."), cls);
+  show("cloud-code-box", !!c.pair_code);
   if (c.pair_code) $("cloud-code").textContent = c.pair_code;
-  show("b-cloud-unlink", !!c.paired);
-  $("b-cloud-pair").textContent = c.paired ? "Show new pairing code" : (c.pairing ? "Get a new code" : "Show pairing code");
+  show("b-cloud-unlink", !!c.paired && !c.pairing);
+  $("b-cloud-pair").textContent = c.paired && !c.pairing ? "Show new pairing code"
+    : (c.pairing ? "Get a new code" : "Show pairing code");
   $("b-cloud-pair").disabled = !(st.wifi && st.wifi.connected);
 }
 
@@ -1709,7 +1722,12 @@ async function saveMqtt() {
     $("mqtt-msg").textContent = "Pick a port from 1 to 65535.";
     return false;
   }
-  const body = {host: host, port: host ? port : 1883, user: $("mqtt-user").value.trim()};
+  const body = {
+    host: host,
+    port: host ? port : 1883,
+    user: $("mqtt-user").value.trim(),
+    expose: $("mqtt-expose").value === "controls" ? "controls" : "full",
+  };
   const pass = $("mqtt-pass").value;
   if (pass) body.password = pass;
   let r;
@@ -1719,7 +1737,7 @@ async function saveMqtt() {
   return r.ok;
 }
 
-["mqtt-host", "mqtt-port", "mqtt-user", "mqtt-pass"].forEach((id) => {
+["mqtt-host", "mqtt-port", "mqtt-user", "mqtt-pass", "mqtt-expose"].forEach((id) => {
   $(id).addEventListener("input", () => { mqttDirty = true; $("mqtt-msg").textContent = ""; });
   $(id).addEventListener("change", () => { mqttDirty = true; });
 });
@@ -1749,7 +1767,14 @@ $("b-cloud-pair").addEventListener("click", async () => {
   $("cloud-msg").textContent = "Contacting Bell-Towne…";
   let r;
   try { r = await api("/api/cloud/pair", {}); } catch (e) { r = {ok: false, j: {}}; }
-  $("cloud-msg").textContent = r.ok ? (r.j.message || "Code ready.") : (r.j.error || "Could not start pairing. Check WiFi and try again.");
+  if (r.ok && r.j.code) {
+    $("cloud-code").textContent = r.j.code;
+    show("cloud-code-box", true);
+    $("cloud-msg").textContent = r.j.message || "Code ready.";
+  } else {
+    $("cloud-msg").textContent = r.ok ? (r.j.message || "Code ready.")
+      : (r.j.error || "Could not start pairing. Check WiFi and try again.");
+  }
   $("b-cloud-pair").disabled = false;
   kick();
 });

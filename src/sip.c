@@ -639,11 +639,11 @@ uint32_t sip_result_seq(void)
 const char *sip_call_state_name(call_state_t s)
 {
     switch (s) {
-    case CALL_IDLE: return "IDLE";
-    case CALL_CALLING: return "CALLING";
-    case CALL_RINGING: return "RINGING";
-    case CALL_IN_CALL: return "IN_CALL";
-    case CALL_ENDING: return "ENDING";
+    case CALL_IDLE: return "idle";
+    case CALL_CALLING: return "calling";
+    case CALL_RINGING: return "ringing";
+    case CALL_IN_CALL: return "in_call";
+    case CALL_ENDING: return "ending";
     default: return "?";
     }
 }
