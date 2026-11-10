@@ -53,12 +53,11 @@ Every ~30 s (faster while pairing):
 |-------|------|
 | `slot` | `0 … CFG_MAX_CONTACTS-1` |
 | `name` | Display name from NVS (may be `""`) |
-| `number_masked` | Never full E.164. Example: `+15551234567` → `+1•••4567` (keep `+` and first digit, `•••`, last 4). Omitted when the slot has no number |
+| `number` | Full E.164 from NVS. Omitted when the slot has no number |
 
 **Never sent:** Wi‑Fi passwords, Twilio Auth Token, SIP password, restricted
-API secrets, full phone numbers, secret-message emails. Schedules are not
-pushed here (availability still flows cloud → phone via
-`set_contact_schedule`).
+API secrets, secret-message emails. Schedules are not pushed here
+(availability still flows cloud → phone via `set_contact_schedule`).
 
 Call logs use a bounded ring buffer (`APP_CLOUD_LOG_CAPACITY`); oldest events
 drop if the app is unreachable. Events are idempotent by `event_id` per device.
@@ -66,6 +65,6 @@ drop if the app is unreachable. Events are idempotent by `event_id` per device.
 ## Product model
 
 - One Bell-Towne **owner** per device (co-owners deferred).
-- Contact slot 0–23 is the join key to a callee in the app; cloud does not
-  sync dialable numbers (roster uses masked numbers + names only).
+- Contact slot 0–23 is the join key to a callee in the app; roster sync
+  includes names and phone numbers for the manage UI.
 - Callee availability edits become pending `set_contact_schedule` commands.

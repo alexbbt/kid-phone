@@ -341,55 +341,7 @@ static void add_status_object(cJSON *parent, const char *key)
     }
 }
 
-/* Never put a full E.164 in JSON. "+15551234567" → "+1•••4567". */
-static void mask_e164(const char *num, char *out, size_t cap)
-{
-    if (!out || cap < 8) {
-        if (out && cap) {
-            out[0] = '\0';
-        }
-        return;
-    }
-    out[0] = '\0';
-    if (!num || !num[0]) {
-        return;
-    }
-    size_t n = strlen(num);
-    int ndig = 0;
-    for (size_t i = 0; i < n; i++) {
-        if (num[i] >= '0' && num[i] <= '9') {
-            ndig++;
-        }
-    }
-    if (ndig < 4) {
-        strlcpy(out, "••••", cap);
-        return;
-    }
-    char prefix[4];
-    int pi = 0;
-    const char *p = num;
-    if (*p == '+') {
-        prefix[pi++] = *p++;
-        while (*p && (*p < '0' || *p > '9')) {
-            p++;
-        }
-        if (*p >= '0' && *p <= '9') {
-            prefix[pi++] = *p;
-        }
-    }
-    prefix[pi] = '\0';
-    char last[5];
-    int li = 4;
-    last[4] = '\0';
-    for (int i = (int)n - 1; i >= 0 && li > 0; i--) {
-        if (num[i] >= '0' && num[i] <= '9') {
-            last[--li] = num[i];
-        }
-    }
-    snprintf(out, cap, "%s•••%s", prefix, last + li);
-}
-
-/* Slot roster for the Bell-Towne manage UI (names + masked numbers only). */
+/* Slot roster for the Bell-Towne manage UI (names + numbers). */
 static void add_contacts_array(cJSON *root)
 {
     cJSON *arr = cJSON_AddArrayToObject(root, "contacts");
@@ -412,11 +364,7 @@ static void add_contacts_array(cJSON *root)
             cJSON_AddStringToObject(o, "name", "");
         }
         if (c.number[0]) {
-            char masked[24];
-            mask_e164(c.number, masked, sizeof(masked));
-            if (masked[0]) {
-                cJSON_AddStringToObject(o, "number_masked", masked);
-            }
+            cJSON_AddStringToObject(o, "number", c.number);
         }
         cJSON_AddItemToArray(arr, o);
         mbedtls_platform_zeroize(&c, sizeof(c));
