@@ -190,11 +190,29 @@ footer { color: var(--muted); font-size: 14px; text-align: center; margin-top: 2
     <h2>Voice language</h2>
     <label for="lang">Language the phone speaks in</label>
     <select id="lang" style="max-width: 320px">
-      <option value="en">English</option>
+      <option value="en">English (built in)</option>
+      <option value="ca" lang="ca">Català</option>
+      <option value="es" lang="es">Español</option>
+      <option value="fr" lang="fr">Français</option>
+      <option value="it" lang="it">Italiano</option>
+      <option value="nl" lang="nl">Nederlands</option>
+      <option value="de" lang="de">Deutsch</option>
+      <option value="vi" lang="vi">Tiếng Việt</option>
+      <option value="pt-br" lang="pt-BR">Português (Brasil)</option>
     </select>
-    <p class="hint">This build speaks English only (keeps the firmware small enough for wireless updates later). <b>Play a sample</b> says one sentence on the handset.</p>
+    <p class="hint">English is in the firmware. Other languages download once over WiFi into phone storage (they survive firmware updates). After a new language is downloaded, press <b>Run setup again</b> once so Twilio has that language’s “no answer” clip.</p>
+    <button type="button" id="b-lang">Save</button>
     <button type="button" class="secondary" id="b-lang-play">Play a sample</button>
     <p class="hint" id="lang-msg"></p>
+  </section>
+
+  <section class="card" id="c-ota">
+    <h2>Firmware update (WiFi)</h2>
+    <label for="ota-url">Firmware image URL (https)</label>
+    <input id="ota-url" type="url" placeholder="https://…/firmware.bin" autocomplete="off">
+    <p class="hint">Installs a new build over WiFi into the unused firmware slot, then reboots. Needs a one-time USB flash after switching to the dual-slot partition table. Prefer a release build, not a random file.</p>
+    <button type="button" id="b-ota">Update and reboot</button>
+    <p class="hint" id="ota-msg"></p>
   </section>
 
   <section class="card" id="c-bed">
@@ -925,7 +943,7 @@ function render() {
   const mm = $("maxmin");
   if (set.max_call_minutes && document.activeElement !== mm && !mmDirty) mm.value = set.max_call_minutes;
   if (set.max_call_minutes_lo) { mm.min = set.max_call_minutes_lo; mm.max = set.max_call_minutes_hi; }
-  $("lang").value = "en";
+  if (set.lang) $("lang").value = set.lang;
   const em = $("emtaps");
   if (set.emergency_taps !== undefined && document.activeElement !== em && !emDirty) em.value = set.emergency_taps ? set.emergency_taps : "";
   if (set.emergency_taps_hi) em.max = set.emergency_taps_hi;
@@ -1357,13 +1375,55 @@ $("b-emtaps").addEventListener("click", async () => {
   if (r.ok) { emDirty = false; kick(); }
 });
 
-/* ---------- voice language (English only in this build) ---------- */
+/* ---------- voice language ---------- */
 
+async function ensureLangPack(code) {
+  if (code === "en") return true;
+  const langs = (st && st.settings && st.settings.languages) || [];
+  const row = langs.find((x) => x.code === code);
+  if (row && row.installed) return true;
+  $("lang-msg").textContent = "Downloading language pack…";
+  const r = await api("/api/lang-pack", {lang: code});
+  if (!r.ok) {
+    $("lang-msg").textContent = r.j.error || "Could not download that language.";
+    return false;
+  }
+  $("lang-msg").textContent = r.j.message || "Language pack installed.";
+  await kick();
+  return true;
+}
+
+$("b-lang").addEventListener("click", async () => {
+  const code = $("lang").value;
+  $("b-lang").disabled = true;
+  $("b-lang-play").disabled = true;
+  if (await ensureLangPack(code)) {
+    const r = await api("/api/settings", {lang: code});
+    $("lang-msg").textContent = r.ok ? "Saved." : (r.j.error || "Could not save. Try again.");
+    if (r.ok) kick();
+  }
+  $("b-lang").disabled = false;
+  $("b-lang-play").disabled = false;
+});
 $("b-lang-play").addEventListener("click", async () => {
   $("b-lang-play").disabled = true;
   const r = await api("/api/prompt/sample", {});
   $("lang-msg").textContent = r.ok ? "Playing on the handset." : (r.j.error || "Could not play. Try again.");
   $("b-lang-play").disabled = false;
+});
+
+$("b-ota").addEventListener("click", async () => {
+  const url = $("ota-url").value.trim();
+  if (!url) {
+    $("ota-msg").textContent = "Paste an https:// link to a firmware.bin first.";
+    return;
+  }
+  if (!confirm("Update the phone firmware from the network and reboot?")) return;
+  $("b-ota").disabled = true;
+  $("ota-msg").textContent = "Downloading… the page may disconnect when the phone reboots.";
+  const r = await api("/api/ota", {url});
+  $("b-ota").disabled = false;
+  $("ota-msg").textContent = r.ok ? (r.j.message || "Rebooting…") : (r.j.error || "Update failed.");
 });
 
 /* ---------- bedtime ---------- */

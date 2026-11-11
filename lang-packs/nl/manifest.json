@@ -1,0 +1,56 @@
+{
+  "lang": "nl",
+  "version": 1,
+  "files": [
+    {
+      "name": "time_up.pcm",
+      "url": "https://raw.githubusercontent.com/alexbbt/kid-phone/working/integrations/src/prompts/time_up_nl.pcm",
+      "size": 124270
+    },
+    {
+      "name": "unavailable.pcm",
+      "url": "https://raw.githubusercontent.com/alexbbt/kid-phone/working/integrations/src/prompts/unavailable_nl.pcm",
+      "size": 109878
+    },
+    {
+      "name": "no_answer.pcm",
+      "url": "https://raw.githubusercontent.com/alexbbt/kid-phone/working/integrations/src/prompts/no_answer_nl.pcm",
+      "size": 67198
+    },
+    {
+      "name": "no_wifi.pcm",
+      "url": "https://raw.githubusercontent.com/alexbbt/kid-phone/working/integrations/src/prompts/no_wifi_nl.pcm",
+      "size": 131108
+    },
+    {
+      "name": "not_ready.pcm",
+      "url": "https://raw.githubusercontent.com/alexbbt/kid-phone/working/integrations/src/prompts/not_ready_nl.pcm",
+      "size": 138366
+    },
+    {
+      "name": "cant_call.pcm",
+      "url": "https://raw.githubusercontent.com/alexbbt/kid-phone/working/integrations/src/prompts/cant_call_nl.pcm",
+      "size": 138796
+    },
+    {
+      "name": "sleep_time.pcm",
+      "url": "https://raw.githubusercontent.com/alexbbt/kid-phone/working/integrations/src/prompts/sleep_time_nl.pcm",
+      "size": 104248
+    },
+    {
+      "name": "secret_start.pcm",
+      "url": "https://raw.githubusercontent.com/alexbbt/kid-phone/working/integrations/src/prompts/secret_start_nl.pcm",
+      "size": 62224
+    },
+    {
+      "name": "secret_sent.pcm",
+      "url": "https://raw.githubusercontent.com/alexbbt/kid-phone/working/integrations/src/prompts/secret_sent_nl.pcm",
+      "size": 96520
+    },
+    {
+      "name": "no_answer.wav",
+      "url": "https://raw.githubusercontent.com/alexbbt/kid-phone/working/integrations/twilio/no_answer_nl.wav",
+      "size": 16858
+    }
+  ]
+}

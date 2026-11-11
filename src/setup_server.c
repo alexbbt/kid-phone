@@ -20,8 +20,10 @@
 #include "cfg_edit.h"
 #include "cloud_sync.h"
 #include "config_store.h"
+#include "lang_pack.h"
 #include "modes.h"
 #include "mqtt_ha.h"
+#include "ota_update.h"
 #include "pins.h"
 #include "prompts.h"
 #include "schedule.h"
@@ -394,6 +396,16 @@ static esp_err_t h_status(httpd_req_t *req)
     cJSON_AddNumberToObject(set, "max_call_minutes_hi", APP_CALL_MAX_MIN_HI);
     cJSON_AddBoolToObject(set, "calls_allowed", c->calls_allowed);
     cJSON_AddStringToObject(set, "lang", prompt_lang_code((prompt_lang_t)c->lang));
+    cJSON *langs = cJSON_AddArrayToObject(set, "languages");
+    for (int i = 0; i < PROMPT_LANG_COUNT; i++) {
+        cJSON *lo = cJSON_CreateObject();
+        cJSON_AddStringToObject(lo, "code", prompt_lang_code((prompt_lang_t)i));
+        cJSON_AddBoolToObject(lo, "installed", lang_pack_installed((prompt_lang_t)i));
+        cJSON_AddItemToArray(langs, lo);
+    }
+    char lang_base[160];
+    lang_pack_get_base_url(lang_base, sizeof(lang_base));
+    cJSON_AddStringToObject(set, "lang_pack_base", lang_base);
     cJSON_AddNumberToObject(set, "emergency_taps", c->emerg_taps);
     cJSON_AddNumberToObject(set, "emergency_taps_lo", APP_EMERGENCY_TAPS_LO);
     cJSON_AddNumberToObject(set, "emergency_taps_hi", APP_EMERGENCY_TAPS_HI);
@@ -717,7 +729,11 @@ static esp_err_t h_settings(httpd_req_t *req)
         return send_msg(req, "400 Bad Request", false, e);
     }
     if (l && lang == PROMPT_LANG_COUNT) {
-        return send_msg(req, "400 Bad Request", false, "Pick English, Catalan or Spanish.");
+        return send_msg(req, "400 Bad Request", false, "Pick a language the phone knows.");
+    }
+    if (l && lang != PROMPT_LANG_EN && !lang_pack_installed(lang)) {
+        return send_msg(req, "409 Conflict", false,
+                        "Download that language pack first (Save will say when it is ready).");
     }
     if (e && (!e_ok || et != (double)(int)et ||
               (et != 0 && (et < APP_EMERGENCY_TAPS_LO || et > APP_EMERGENCY_TAPS_HI)))) {
@@ -747,6 +763,74 @@ static esp_err_t h_settings(httpd_req_t *req)
         ESP_LOGI(TAG, "emergency override set to %d presses (0 = off) from the web page", (int)et);
     }
     return send_msg(req, "200 OK", true, "Saved.");
+}
+
+typedef struct {
+    httpd_req_t *req;
+    char last[96];
+} pack_prog_t;
+
+static void pack_progress(const char *line, void *user)
+{
+    pack_prog_t *p = user;
+    if (p && line) {
+        strlcpy(p->last, line, sizeof(p->last));
+        ESP_LOGI(TAG, "lang pack: %s", line);
+    }
+}
+
+/* POST /api/lang-pack {lang}: download a voice pack onto /storage. */
+static esp_err_t h_lang_pack(httpd_req_t *req)
+{
+    if (!post_ok(req)) {
+        return ESP_OK;
+    }
+    cJSON *j = read_json(req);
+    if (!j) {
+        return send_msg(req, "400 Bad Request", false, "Send {\"lang\": \"ca\"}.");
+    }
+    const char *code = json_str(j, "lang");
+    prompt_lang_t lang = prompt_lang_from_code(code);
+    cJSON_Delete(j);
+    if (lang == PROMPT_LANG_COUNT) {
+        return send_msg(req, "400 Bad Request", false, "Unknown language.");
+    }
+    if (!wifi_is_connected()) {
+        return send_msg(req, "409 Conflict", false, "Connect to WiFi first.");
+    }
+    pack_prog_t prog = {.req = req, .last = {0}};
+    if (!lang_pack_install(lang, pack_progress, &prog)) {
+        return send_msg(req, "502 Bad Gateway", false, prog.last[0] ? prog.last : "Language pack download failed.");
+    }
+    return send_msg(req, "200 OK", true, prog.last[0] ? prog.last : "Language pack installed.");
+}
+
+/* POST /api/ota {url}: HTTPS firmware update into the other OTA slot, then reboot. */
+static esp_err_t h_ota(httpd_req_t *req)
+{
+    if (!post_ok(req)) {
+        return ESP_OK;
+    }
+    cJSON *j = read_json(req);
+    if (!j) {
+        return send_msg(req, "400 Bad Request", false, "Send {\"url\": \"https://…/firmware.bin\"}.");
+    }
+    const char *url = json_str(j, "url");
+    char urlbuf[200];
+    strlcpy(urlbuf, url, sizeof(urlbuf));
+    cJSON_Delete(j);
+    if (!urlbuf[0]) {
+        return send_msg(req, "400 Bad Request", false, "Send {\"url\": \"https://…/firmware.bin\"}.");
+    }
+    if (!wifi_is_connected()) {
+        return send_msg(req, "409 Conflict", false, "Connect to WiFi first.");
+    }
+    pack_prog_t prog = {.req = req, .last = {0}};
+    /* On success this reboots and never returns a response. */
+    if (!ota_update_from_url(urlbuf, pack_progress, &prog)) {
+        return send_msg(req, "502 Bad Gateway", false, prog.last[0] ? prog.last : "Firmware update failed.");
+    }
+    return ESP_OK;
 }
 
 /* Handset troubleshooting (Advanced): what the phone sees, and the saved
@@ -1569,7 +1653,7 @@ void setup_server_start(void)
     cfg.server_port = APP_HTTP_PORT;
     cfg.stack_size = APP_HTTP_STACK;
     cfg.max_open_sockets = 5;
-    cfg.max_uri_handlers = 24; /* keep in sync with uris[] below */
+    cfg.max_uri_handlers = 26; /* keep in sync with uris[] below */
     cfg.lru_purge_enable = true;
     cfg.core_id = 0;
     httpd_handle_t srv = NULL;
@@ -1590,6 +1674,8 @@ void setup_server_start(void)
         {.uri = "/api/handset", .method = HTTP_POST, .handler = h_handset},
         {.uri = "/api/bedtime", .method = HTTP_POST, .handler = h_bedtime},
         {.uri = "/api/calls-allowed", .method = HTTP_POST, .handler = h_calls_allowed},
+        {.uri = "/api/lang-pack", .method = HTTP_POST, .handler = h_lang_pack},
+        {.uri = "/api/ota", .method = HTTP_POST, .handler = h_ota},
         {.uri = "/api/pins", .method = HTTP_POST, .handler = h_pins},
         {.uri = "/api/secret", .method = HTTP_POST, .handler = h_secret},
         {.uri = "/api/secret/test", .method = HTTP_POST, .handler = h_secret_test},
@@ -1604,7 +1690,7 @@ void setup_server_start(void)
         {.uri = "/api/wifi/add", .method = HTTP_POST, .handler = h_wifi_add},
         {.uri = "/api/wifi/remove", .method = HTTP_POST, .handler = h_wifi_remove},
     };
-    _Static_assert(sizeof(uris) / sizeof(uris[0]) <= 24, "raise max_uri_handlers");
+    _Static_assert(sizeof(uris) / sizeof(uris[0]) <= 26, "raise max_uri_handlers");
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
         esp_err_t e = httpd_register_uri_handler(srv, &uris[i]);
         if (e != ESP_OK) {

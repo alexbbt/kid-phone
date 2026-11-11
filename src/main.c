@@ -62,6 +62,7 @@
 #include "setup_server.h"
 #include "sip.h"
 #include "status_led.h"
+#include "storage.h"
 #include "usb_audio.h"
 #include "wifi.h"
 
@@ -792,6 +793,7 @@ void app_main(void)
              APP_BOOT_GPIO, APP_FACTORY_RESET_MS);
 
     config_store_init();
+    storage_init();
     /* Prompt language before anything can speak or call (sip.c sends it). */
     prompt_set_lang((prompt_lang_t)config_lang());
     /* Buttons and lights as saved (or the default wiring), before any task

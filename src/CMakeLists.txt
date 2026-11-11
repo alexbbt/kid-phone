@@ -15,5 +15,5 @@ idf_component_register(SRCS ${app_sources}
                                    "${CMAKE_SOURCE_DIR}/twilio/no_answer.wav"
                        REQUIRES usb esp_timer driver g711 resampler
                                 esp_wifi esp_netif esp_event nvs_flash lwip mbedtls
-                                esp_http_client esp_http_server json esp_driver_uart esp_app_format esp-tls
-                                mqtt)
+                                esp_http_client esp_http_server esp_https_ota app_update json
+                                esp_driver_uart esp_app_format esp-tls mqtt littlefs)

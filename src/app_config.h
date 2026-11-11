@@ -317,10 +317,15 @@
  * https://<env domain>/no-answer.wav. Path must match NO_ANSWER_ASSET in
  * twilio/voice.js. */
 #define APP_TW_ASSET_NAME       "no-answer"
-/* SIP header with the prompt language ("en" in this build) on every INVITE.
+/* SIP header with the prompt language on every INVITE.
  * Twilio hands X- headers to the Function as event["SipHeader_<name>"]; must
  * match LANG_HEADER in twilio/voice.js. */
 #define APP_SIP_LANG_HEADER     "X-Kidphone-Lang"
+/* HTTPS base for downloadable language packs (no trailing slash). Each pack
+ * is {base}/{lang}/manifest.json plus the clip files it lists. Override in
+ * NVS via the setup page. Empty = packs cannot be downloaded until set. */
+#define APP_LANG_PACK_BASE_DEFAULT \
+    "https://raw.githubusercontent.com/alexbbt/kid-phone/working/integrations/lang-packs"
 /* What a full setup installs in Twilio (voice.js and its assets). Bump it
  * whenever twilio/voice.js or an asset changes: a phone whose stored value
  * (NVS tw_prog, 0 = set up before this marker existed) is lower shows "Run
