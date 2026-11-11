@@ -25,7 +25,8 @@ static void leds_task(void *arg)
         const int calling = sip_call_contact_index();
         /* No WiFi or not set up: the phone cannot call anyone, so every light
          * is off (a press then says why). */
-        const bool can_call = wifi_is_connected() && config_is_provisioned();
+        const bool can_call =
+            wifi_is_connected() && config_is_provisioned() && config_calls_allowed();
         /* Bedtime: every light off, whatever each contact's own hours say.
          * A call already going keeps blinking (it is not cut off). */
         const bool asleep = schedule_bedtime_active();

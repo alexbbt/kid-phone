@@ -317,6 +317,7 @@ static void load(void)
     mbedtls_platform_zeroize(s_wifi, sizeof(s_wifi));
     s_nwifi = 0;
     s_cfg.max_call_min = APP_CALL_MAX_MIN_DEFAULT;
+    s_cfg.calls_allowed = true;
     s_cfg.bedtime.start_min = APP_BEDTIME_START_DEFAULT;
     s_cfg.bedtime.end_min = APP_BEDTIME_END_DEFAULT;
     pins_defaults(&s_cfg.pins);
@@ -374,6 +375,11 @@ static void load(void)
     uint16_t mc = 0;
     if (nvs_get_u16(h, "max_call_min", &mc) == ESP_OK && mc >= APP_CALL_MAX_MIN_LO && mc <= APP_CALL_MAX_MIN_HI) {
         s_cfg.max_call_min = mc;
+    }
+    /* Missing = on (phones before this flag keep calling). Explicit 0 = off. */
+    uint8_t calls_ok = 1;
+    if (nvs_get_u8(h, "calls_ok", &calls_ok) == ESP_OK) {
+        s_cfg.calls_allowed = calls_ok != 0;
     }
     /* Bedtime: every key optional (firmware before 0.4.0 wrote none). */
     uint8_t bon = 0;
@@ -941,6 +947,41 @@ esp_err_t config_set_max_call_minutes(unsigned minutes)
     return err;
 }
 
+bool config_calls_allowed(void)
+{
+    lock();
+    bool ok = s_cfg.calls_allowed;
+    unlock();
+    return ok;
+}
+
+esp_err_t config_set_calls_allowed(bool allowed)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    lock();
+    /* On = erase key (same as never set); off = store 0. */
+    err = allowed ? erase_key(h, "calls_ok") : nvs_set_u8(h, "calls_ok", 0);
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    if (err == ESP_OK) {
+        s_cfg.calls_allowed = allowed;
+    }
+    s_gen++;
+    unlock();
+    nvs_close(h);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "saving Calls allowed failed: %s", esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "Calls allowed: %s", allowed ? "on" : "off");
+    }
+    return err;
+}
+
 uint8_t config_lang(void)
 {
     lock();
@@ -1430,6 +1471,7 @@ esp_err_t config_factory_reset(void)
     cloud_defaults(&s_cloud);
     s_nwifi = 0;
     s_cfg.max_call_min = APP_CALL_MAX_MIN_DEFAULT;
+    s_cfg.calls_allowed = true;
     s_cfg.bedtime.start_min = APP_BEDTIME_START_DEFAULT;
     s_cfg.bedtime.end_min = APP_BEDTIME_END_DEFAULT;
     pins_defaults(&s_cfg.pins);

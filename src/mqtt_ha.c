@@ -280,6 +280,11 @@ static void publish_discovery(void)
     topic_state(st, sizeof(st), "last_error");
     discover_sensor("last_error", "Last error", st, NULL, NULL, NULL);
 
+    /* Parent master switch: both expose modes (younger-kid pause without full setup). */
+    topic_state(st, sizeof(st), "calls_allowed");
+    topic_cmd(cmd, sizeof(cmd), "calls_allowed");
+    discover_switch("calls_allowed", "Calls allowed", st, cmd);
+
     topic_cmd(cmd, sizeof(cmd), "hangup");
     discover_button("hangup", "Hang up", cmd);
 
@@ -434,6 +439,9 @@ static void publish_states(void)
     topic_state(topic, sizeof(topic), "last_error");
     pub(topic, err, 1, true);
 
+    topic_state(topic, sizeof(topic), "calls_allowed");
+    pub(topic, config_calls_allowed() ? "ON" : "OFF", 1, true);
+
     if (!full) {
         s_cfg_gen_seen = config_generation();
         return;
@@ -583,7 +591,7 @@ static void load_contacts(cfg_contact_t *ct)
 }
 
 /* Same rules as POST /api/call: availability windows apply; bedtime does not
- * (parent testing from HA). Never honor a retained press. */
+ * (parent testing from HA). Calls allowed must be on. Never honor a retained press. */
 static void handle_call_contact(int idx, bool retain)
 {
     if (retain) {
@@ -594,6 +602,11 @@ static void handle_call_contact(int idx, bool retain)
     config_get_pins(&pins);
     if (idx < 0 || idx >= CFG_MAX_CONTACTS || idx >= pins.count) {
         set_err("No such button.");
+        publish_states();
+        return;
+    }
+    if (!config_calls_allowed()) {
+        set_err("Calls allowed is off.");
         publish_states();
         return;
     }
@@ -846,6 +859,27 @@ static void on_command(const char *topic, int topic_len, const char *data, int d
         }
         ESP_LOGI(TAG, "hang up from Home Assistant");
         sip_call_hangup();
+        return;
+    }
+
+    /* Calls allowed: both expose modes. Turning off ends a call in progress. */
+    if (strcmp(path, "calls_allowed") == 0) {
+        const bool on = strcmp(pbuf, "ON") == 0 || strcmp(pbuf, "on") == 0 || strcmp(pbuf, "1") == 0;
+        const bool off = strcmp(pbuf, "OFF") == 0 || strcmp(pbuf, "off") == 0 || strcmp(pbuf, "0") == 0;
+        if (!on && !off) {
+            set_err("Calls allowed expects ON or OFF.");
+            publish_states();
+            return;
+        }
+        if (config_set_calls_allowed(on) != ESP_OK) {
+            set_err("Could not save Calls allowed.");
+        } else {
+            s_last_err[0] = '\0';
+            if (!on) {
+                sip_call_hangup();
+            }
+        }
+        publish_states();
         return;
     }
 

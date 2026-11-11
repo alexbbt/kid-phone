@@ -24,7 +24,7 @@ pattern as the secret-message SMTP password).
 
 | Mode | What HA gets |
 |------|----------------|
-| **Call buttons only** (`controls`) | Diagnostics (firmware, WiFi, call state, last error), **Call {name}** buttons, Hang up |
+| **Call buttons only** (`controls`) | Diagnostics (firmware, WiFi, call state, last error), **Calls allowed**, **Call {name}** buttons, Hang up |
 | **Full setup** (`full`) | Everything above, plus contact name/number, schedules, bedtime, max call length, home time zone |
 
 Default when the setting is missing (older firmware / first flash): **full**.
@@ -70,12 +70,14 @@ a press. Retained call/hang-up payloads are ignored if they somehow appear.
 | `kidphone/<id>/rssi` | WiFi RSSI (dBm) |
 | `kidphone/<id>/call_state` | `idle`, `calling`, `ringing`, `in_call`, `ending` |
 | `kidphone/<id>/last_error` | Last call / save error message, or empty |
+| `kidphone/<id>/calls_allowed` | `ON` / `OFF` — parent master switch for outbound calls |
 
 ### Call and hang up — both modes
 
 | Command | Payload | Notes |
 |---------|---------|--------|
-| `kidphone/<id>/contact/N/call/set` | `PRESS` | Place a call to contact N (1-based). Same rules as the setup page **Call** button: needs WiFi + Twilio ready, respects that person's available hours, skips bedtime (parent testing). Errors go to `last_error`. |
+| `kidphone/<id>/calls_allowed/set` | `ON` / `OFF` | Master outbound enable. `OFF` blocks buttons, emergency override, setup **Call**, and HA call buttons, turns contact lights off, and hangs up a call in progress. Default when unset: `ON`. |
+| `kidphone/<id>/contact/N/call/set` | `PRESS` | Place a call to contact N (1-based). Same rules as the setup page **Call** button: needs Calls allowed on, WiFi + Twilio ready, respects that person's available hours, skips bedtime (parent testing). Errors go to `last_error`. |
 | `kidphone/<id>/hangup/set` | `PRESS` | End the current call |
 
 ### Phone settings — full mode only

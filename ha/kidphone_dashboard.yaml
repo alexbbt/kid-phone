@@ -25,6 +25,8 @@ views:
       - type: entities
         title: Status
         entities:
+          - entity: switch.kid_phone_calls_allowed
+            name: Calls allowed
           - entity: sensor.kid_phone_call_state
             name: Call
           - entity: sensor.kid_phone_last_error
@@ -47,6 +49,10 @@ views:
 
       - type: markdown
         content: |
+          **Calls allowed** is the parent master switch (both MQTT expose
+          modes). Off = nobody can be called, including emergency presses;
+          a call already going is hung up.
+
           **Call buttons** show the person’s name (Call Grandma). Available
           hours apply; bedtime does not (same as the setup page). Call and
           hang-up are never retained.

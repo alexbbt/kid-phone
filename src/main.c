@@ -358,9 +358,13 @@ static bool run_press(int idx)
 /* The run reached the override count. Only bedtime and the contact's hours
  * are overridden: with nothing to override this returns false and the press
  * goes the usual way (a call, or ignored during the cooldown). No WiFi or
- * Twilio not set up still fail with their prompt, once. */
+ * Twilio not set up still fail with their prompt, once. Calls allowed off
+ * is not overridden (checked before this runs). */
 static bool emergency_fire(int idx)
 {
+    if (!config_calls_allowed()) {
+        return false;
+    }
     cfg_contact_t c;
     if (!config_get_contact(idx, &c)) {
         return false; /* empty slot or secret button: nobody to call */
@@ -401,6 +405,10 @@ static void emergency_poll(void)
     }
     const int idx = s_em_call;
     s_em_call = -1;
+    if (!config_calls_allowed()) {
+        ESP_LOGW(TAG, "BUTTON %d: emergency call not placed, Calls allowed is off", idx);
+        return;
+    }
     if (sip_call_state() != CALL_IDLE || secret_active()) {
         ESP_LOGW(TAG, "BUTTON %d: emergency call not placed, the phone is busy", idx);
         return;
@@ -435,14 +443,20 @@ static void on_press_idle(int idx)
 {
     const bool run = s_run.slot == idx && s_run.state == RUN_COUNTING;
     const int need = config_emergency_taps();
-    if (need > 0 && run && s_run.count >= need && emergency_fire(idx)) {
-        return;
-    }
     if (run && s_run.told) {
         ESP_LOGI(TAG, "BUTTON %d: press %d of a run, already told why not", idx, s_run.count);
         return;
     }
     if (press_blocked(idx)) {
+        return;
+    }
+    /* Parent master switch: no outbound calls for anyone (including emergency). */
+    if (!config_calls_allowed()) {
+        ESP_LOGI(TAG, "BUTTON %d: Calls allowed is off, busy tone", idx);
+        refuse(idx, PROMPT_UNAVAILABLE, APP_SHORT_BUSY_MS);
+        return;
+    }
+    if (need > 0 && run && s_run.count >= need && emergency_fire(idx)) {
         return;
     }
     /* Bedtime first: whatever else is wrong, the child only needs to hear

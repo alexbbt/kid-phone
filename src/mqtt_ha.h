@@ -1,11 +1,12 @@
 /*
  * Home Assistant MQTT discovery for the kid phone.
  *
- * Parents edit contacts, schedules, bedtime and call length from HA, and can
- * place a test call to each contact (same rules as the setup page Call
- * button: respects availability windows, skips bedtime). The phone keeps NVS
- * as the source of truth. Calling does not depend on MQTT for the handset:
- * if the broker is down, SIP/RTP keep working. Call and hang-up are
+ * Parents edit contacts, schedules, bedtime and call length from HA, flip
+ * Calls allowed (master outbound enable, both expose modes), and can place
+ * a test call to each contact (same rules as the setup page Call button:
+ * needs Calls allowed on, respects availability windows, skips bedtime).
+ * The phone keeps NVS as the source of truth. Calling does not depend on
+ * MQTT for the handset: if the broker is down, SIP/RTP keep working. Call and hang-up are
  * non-retained command buttons so a broker or HA restart cannot replay them.
  *
  * Broker host/user/password live in NVS (setup page). Empty host = off.

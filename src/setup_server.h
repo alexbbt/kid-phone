@@ -10,6 +10,7 @@
  *   POST /api/contacts     {contacts}: names, button order and schedules, no
  *                          token; 409 needs_token if the set of numbers changed
  *   POST /api/call         {contact}: test call (same rules as that button)
+ *   POST /api/calls-allowed {allowed}: master outbound enable; false hangs up
  *   POST /api/settings     {max_call_minutes}: longest call, no token
  *   POST /api/secret       {smtp_host, smtp_port, smtp_security, smtp_user,
  *                          smtp_pass, from_name, kid_name, max_seconds,

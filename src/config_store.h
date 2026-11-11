@@ -29,6 +29,7 @@
  *   tw_prog                    u8, APP_TW_PROGRAM_VERSION of the call program the last
  *                              full setup deployed (missing = 0, older firmware)
  *   max_call_min               u16, longest call in minutes (missing = APP_CALL_MAX_MIN_DEFAULT)
+ *   calls_ok                   u8, 0 = Calls allowed off (missing or 1 = on; older phones stay on)
  *   bed_on                     u8, 1 = bedtime on (missing = off, so older configs load unchanged)
  *   bed_start, bed_end         u16, bedtime window in minutes of the day, home time
  *                              (missing = APP_BEDTIME_START_DEFAULT / APP_BEDTIME_END_DEFAULT)
@@ -204,6 +205,7 @@ typedef struct {
     char env_sid[40];
     uint8_t call_program;  /* tw_prog: APP_TW_PROGRAM_VERSION last deployed, 0 = unknown */
     uint16_t max_call_min; /* APP_CALL_MAX_MIN_LO..APP_CALL_MAX_MIN_HI */
+    bool calls_allowed;    /* master outbound enable; default true */
     cfg_bedtime_t bedtime;
     cfg_pins_t pins;
     cfg_secret_t secret;
@@ -288,6 +290,12 @@ bool config_has_twilio_key(void);
  * APP_CALL_MAX_MIN_LO..APP_CALL_MAX_MIN_HI). */
 uint16_t config_max_call_minutes(void);
 esp_err_t config_set_max_call_minutes(unsigned minutes);
+
+/* Master outbound enable ("Calls allowed"). Default true when unset. When
+ * false, buttons / MQTT / setup Call cannot place calls (including emergency
+ * override). Does not hang up by itself; the caller should if needed. */
+bool config_calls_allowed(void);
+esp_err_t config_set_calls_allowed(bool allowed);
 
 /* Language of the spoken prompts (prompt_lang_t), and setting it
  * (ESP_ERR_INVALID_ARG if out of range). The caller also hands it to

@@ -137,6 +137,7 @@ footer { color: var(--muted); font-size: 14px; text-align: center; margin-top: 2
     <div class="row"><span>Phone service</span><span id="s-tw">...</span></div>
     <div class="row"><span>Handset</span><span id="s-hs">...</span></div>
     <div class="row"><span>Clock</span><span id="s-clock">...</span></div>
+    <div class="row"><span>Calls allowed</span><span><span id="s-calls">...</span><a class="jump" href="#c-allowed">Change</a></span></div>
     <div class="row"><span>Calls come from</span><span id="s-from">...</span></div>
     <div class="row" id="r-mqtt"><span>Home Assistant</span><span><span id="s-mqtt">...</span><a class="jump" href="#c-mqtt" id="l-mqtt">MQTT</a></span></div>
     <div class="row" id="r-cloud"><span>Bell-Towne cloud</span><span><span id="s-cloud">...</span><a class="jump" href="#c-cloud" id="l-cloud">Pair</a></span></div>
@@ -158,6 +159,14 @@ footer { color: var(--muted); font-size: 14px; text-align: center; margin-top: 2
     </div>
   </section>
 
+  <section class="card" id="c-allowed">
+    <h2>Calls allowed</h2>
+    <label class="toggle"><input type="checkbox" id="calls-ok"> Allow calls from the buttons</label>
+    <p class="hint">Turn this off when you do not want anyone called — for example while a younger child has the phone. Lights go off, button presses do not call (including emergency presses), and a call already going is hung up. Turn it back on when calling is OK again. Home Assistant has the same switch. Bedtime and each person's available hours still apply when this is on.</p>
+    <button type="button" id="b-calls-ok">Save</button>
+    <p class="hint" id="calls-ok-msg"></p>
+  </section>
+
   <section class="card" id="c-calls">
     <h2>Call length</h2>
     <label for="maxmin">Longest call, in minutes</label>
@@ -171,7 +180,7 @@ footer { color: var(--muted); font-size: 14px; text-align: center; margin-top: 2
     <h2>Emergency calls</h2>
     <label for="emtaps">Quick presses that call even when someone is not available</label>
     <input id="emtaps" type="number" inputmode="numeric" min="0" max="50" step="1" placeholder="Off" style="max-width: 140px">
-    <p class="hint">Leave it empty to turn this off (the default). When it is on, pressing the same button this many times in a row, each press less than <span id="emgap">1.5</span> seconds after the last, calls that person even at bedtime or outside their available times. Just before the call the phone plays a short rising tune, so you can tell your child: "If you really need me, keep pressing my button until you hear the music." 15 to 20 is a good number: high enough that playing with the buttons does not set it off. A person who is available is called on the first press as usual. While this is on, more quick presses do not hang up a call the button just made; to hang up, wait a moment, then press. It still needs WiFi and a phone that is set up.</p>
+    <p class="hint">Leave it empty to turn this off (the default). When it is on, pressing the same button this many times in a row, each press less than <span id="emgap">1.5</span> seconds after the last, calls that person even at bedtime or outside their available times. It does <b>not</b> override Calls allowed when that is off. Just before the call the phone plays a short rising tune, so you can tell your child: "If you really need me, keep pressing my button until you hear the music." 15 to 20 is a good number: high enough that playing with the buttons does not set it off. A person who is available is called on the first press as usual. While this is on, more quick presses do not hang up a call the button just made; to hang up, wait a moment, then press. It still needs WiFi and a phone that is set up.</p>
     <p class="hint" id="emlast"></p>
     <button type="button" id="b-emtaps">Save</button>
     <p class="hint" id="emtaps-msg"></p>
@@ -920,6 +929,9 @@ function render() {
   $("fw").textContent = "Firmware " + st.firmware;
   renderHandset(st.handset_info || {});
   const set = st.settings || {};
+  const callsOk = set.calls_allowed !== false;
+  setText("s-calls", callsOk ? "On" : "Off — nobody can be called", callsOk ? "good" : "bad");
+  if (document.activeElement !== $("calls-ok")) $("calls-ok").checked = callsOk;
   const mm = $("maxmin");
   if (set.max_call_minutes && document.activeElement !== mm && !mmDirty) mm.value = set.max_call_minutes;
   if (set.max_call_minutes_lo) { mm.min = set.max_call_minutes_lo; mm.max = set.max_call_minutes_hi; }
@@ -1314,6 +1326,13 @@ $("b-connect").addEventListener("click", async () => {
   kick();
 });
 
+$("b-calls-ok").addEventListener("click", async () => {
+  $("b-calls-ok").disabled = true;
+  $("calls-ok-msg").textContent = "";
+  const r = await api("/api/calls-allowed", {allowed: $("calls-ok").checked});
+  $("b-calls-ok").disabled = false;
+  $("calls-ok-msg").textContent = r.ok ? (r.j.message || "Saved.") : (r.j.error || "Could not save. Try again.");
+});
 $("maxmin").addEventListener("input", () => { mmDirty = true; $("maxmin-msg").textContent = ""; });
 $("b-maxmin").addEventListener("click", async () => {
   const v = Number($("maxmin").value);

@@ -392,6 +392,7 @@ static esp_err_t h_status(httpd_req_t *req)
     cJSON_AddNumberToObject(set, "max_call_minutes", c->max_call_min);
     cJSON_AddNumberToObject(set, "max_call_minutes_lo", APP_CALL_MAX_MIN_LO);
     cJSON_AddNumberToObject(set, "max_call_minutes_hi", APP_CALL_MAX_MIN_HI);
+    cJSON_AddBoolToObject(set, "calls_allowed", c->calls_allowed);
     cJSON_AddStringToObject(set, "lang", prompt_lang_code((prompt_lang_t)c->lang));
     cJSON_AddNumberToObject(set, "emergency_taps", c->emerg_taps);
     cJSON_AddNumberToObject(set, "emergency_taps_lo", APP_EMERGENCY_TAPS_LO);
@@ -972,8 +973,35 @@ static esp_err_t h_pins(httpd_req_t *req)
     return send_msg(req, "200 OK", true, "Saved. The buttons and lights work on their new pins now.");
 }
 
+/* POST /api/calls-allowed {allowed}: parent master switch for outbound calls. */
+static esp_err_t h_calls_allowed(httpd_req_t *req)
+{
+    if (!post_ok(req)) {
+        return ESP_OK;
+    }
+    cJSON *j = read_json(req);
+    if (!j) {
+        return send_msg(req, "400 Bad Request", false, "Send {\"allowed\": true or false}.");
+    }
+    const cJSON *v = cJSON_GetObjectItem(j, "allowed");
+    if (!cJSON_IsBool(v)) {
+        cJSON_Delete(j);
+        return send_msg(req, "400 Bad Request", false, "Send {\"allowed\": true or false}.");
+    }
+    const bool allowed = cJSON_IsTrue(v);
+    cJSON_Delete(j);
+    if (config_set_calls_allowed(allowed) != ESP_OK) {
+        return send_msg(req, "500 Internal Server Error", false, "Could not save. Try again.");
+    }
+    if (!allowed) {
+        sip_call_hangup();
+    }
+    return send_msg(req, "200 OK", true, allowed ? "Calls are allowed." : "Calls are turned off.");
+}
+
 /* POST /api/call {contact: i}: test call, same rules as button i, except
- * bedtime: this is the parent testing, so it calls during bedtime too. */
+ * bedtime: this is the parent testing, so it calls during bedtime too.
+ * Calls allowed must still be on. */
 static esp_err_t h_call(httpd_req_t *req)
 {
     if (!post_ok(req)) {
@@ -992,6 +1020,10 @@ static esp_err_t h_call(httpd_req_t *req)
     config_get_pins(&pins);
     if (idx < 0 || idx >= CFG_MAX_CONTACTS || idx >= pins.count) {
         return send_msg(req, "400 Bad Request", false, "No such button.");
+    }
+    if (!config_calls_allowed()) {
+        return send_msg(req, "409 Conflict", false,
+                        "Calls allowed is off. Turn it on under Calls allowed, then try again.");
     }
     if (!wifi_is_connected() || !config_is_provisioned() || twilio_provision_running()) {
         return send_msg(req, "409 Conflict", false, "The phone is not ready to call yet.");
@@ -1537,7 +1569,7 @@ void setup_server_start(void)
     cfg.server_port = APP_HTTP_PORT;
     cfg.stack_size = APP_HTTP_STACK;
     cfg.max_open_sockets = 5;
-    cfg.max_uri_handlers = 23; /* keep in sync with uris[] below */
+    cfg.max_uri_handlers = 24; /* keep in sync with uris[] below */
     cfg.lru_purge_enable = true;
     cfg.core_id = 0;
     httpd_handle_t srv = NULL;
@@ -1557,6 +1589,7 @@ void setup_server_start(void)
         {.uri = "/api/prompt/sample", .method = HTTP_POST, .handler = h_prompt_sample},
         {.uri = "/api/handset", .method = HTTP_POST, .handler = h_handset},
         {.uri = "/api/bedtime", .method = HTTP_POST, .handler = h_bedtime},
+        {.uri = "/api/calls-allowed", .method = HTTP_POST, .handler = h_calls_allowed},
         {.uri = "/api/pins", .method = HTTP_POST, .handler = h_pins},
         {.uri = "/api/secret", .method = HTTP_POST, .handler = h_secret},
         {.uri = "/api/secret/test", .method = HTTP_POST, .handler = h_secret_test},
@@ -1571,7 +1604,7 @@ void setup_server_start(void)
         {.uri = "/api/wifi/add", .method = HTTP_POST, .handler = h_wifi_add},
         {.uri = "/api/wifi/remove", .method = HTTP_POST, .handler = h_wifi_remove},
     };
-    _Static_assert(sizeof(uris) / sizeof(uris[0]) <= 23, "raise max_uri_handlers");
+    _Static_assert(sizeof(uris) / sizeof(uris[0]) <= 24, "raise max_uri_handlers");
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
         esp_err_t e = httpd_register_uri_handler(srv, &uris[i]);
         if (e != ESP_OK) {
