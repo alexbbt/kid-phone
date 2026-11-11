@@ -24,6 +24,9 @@
 #include "schedule.h"
 #include "wifi.h"
 
+/* Same floor as schedule.c: reject unset/1970 clocks for call-log ISO times. */
+#define CLOUD_TIME_PLAUSIBLE 1735689600 /* 2025-01-01 UTC */
+
 static const char *TAG = "cloud_sync";
 
 typedef struct {
@@ -49,6 +52,16 @@ static bool s_started;
 static int64_t now_ms(void)
 {
     return esp_timer_get_time() / 1000;
+}
+
+/* Wall-clock ms for call logs. Uptime (esp_timer) must never go in ISO timestamps. */
+static int64_t wall_ms_now(void)
+{
+    time_t t = time(NULL);
+    if (t > CLOUD_TIME_PLAUSIBLE) {
+        return (int64_t)t * 1000;
+    }
+    return 0;
 }
 
 static void set_err(const char *msg)
@@ -574,6 +587,25 @@ void cloud_sync_log_event(int contact_slot, const char *contact_name, const char
     if (!s_lock || !outcome) {
         return;
     }
+    /* Callers historically passed esp_timer uptime; only keep values that
+     * already look like Unix epoch ms. Otherwise stamp from NTP wall clock. */
+    const int64_t wall_floor = (int64_t)CLOUD_TIME_PLAUSIBLE * 1000;
+    if (ended_ms < wall_floor) {
+        ended_ms = wall_ms_now();
+        if (ended_ms > 0) {
+            started_ms = ended_ms - (int64_t)duration_ms;
+            if (started_ms <= 0 || started_ms > ended_ms) {
+                started_ms = ended_ms;
+            }
+        } else {
+            started_ms = 0;
+        }
+    } else if (started_ms < wall_floor || started_ms > ended_ms) {
+        started_ms = ended_ms - (int64_t)duration_ms;
+        if (started_ms < wall_floor) {
+            started_ms = ended_ms;
+        }
+    }
     xSemaphoreTake(s_lock, portMAX_DELAY);
     if (s_log_count >= APP_CLOUD_LOG_CAPACITY) {
         s_log[s_log_head].used = false;
@@ -583,7 +615,8 @@ void cloud_sync_log_event(int contact_slot, const char *contact_name, const char
     int idx = (s_log_head + s_log_count) % APP_CLOUD_LOG_CAPACITY;
     log_event_t *e = &s_log[idx];
     memset(e, 0, sizeof(*e));
-    snprintf(e->event_id, sizeof(e->event_id), "%08lx-%04x", (unsigned long)(ended_ms & 0xffffffff),
+    snprintf(e->event_id, sizeof(e->event_id), "%08lx-%04x",
+             (unsigned long)((ended_ms > 0 ? ended_ms : now_ms()) & 0xffffffff),
              (unsigned)(esp_random() & 0xffff));
     e->contact_slot = contact_slot;
     if (contact_name) {
@@ -592,7 +625,7 @@ void cloud_sync_log_event(int contact_slot, const char *contact_name, const char
     strlcpy(e->outcome, outcome, sizeof(e->outcome));
     e->duration_ms = duration_ms;
     e->started_ms = started_ms;
-    e->ended_ms = ended_ms > 0 ? ended_ms : now_ms();
+    e->ended_ms = ended_ms;
     e->used = true;
     s_log_count++;
     xSemaphoreGive(s_lock);

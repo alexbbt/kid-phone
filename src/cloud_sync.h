@@ -20,7 +20,9 @@ void cloud_sync_start(void);
 /* Wake the sync task early (after pairing / unlink / queued log). */
 void cloud_sync_kick(void);
 
-/* Queue a call-log event (bounded ring; oldest dropped if app unreachable). */
+/* Queue a call-log event (bounded ring; oldest dropped if app unreachable).
+ * started_ms/ended_ms should be Unix epoch ms; uptime values are ignored and
+ * replaced from NTP wall clock (or omitted until the clock has synced). */
 void cloud_sync_log_event(int contact_slot, const char *contact_name, const char *outcome,
                           uint32_t duration_ms, int64_t started_ms, int64_t ended_ms);
 
