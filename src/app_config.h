@@ -312,14 +312,12 @@
 #define APP_TW_LEGACY_SIP_USER  "handset1"
 #define APP_TW_ENV_NAME         "prod"
 #define APP_TW_FN_NAME          "voice"
-/* Serverless Assets with the "They didn't answer the phone." clip, one per
- * prompt language: twilio/no_answer.wav as "no-answer", public at
- * https://<env domain>/no-answer.wav, and twilio/no_answer_<lang>.wav as
- * "no-answer-<lang>" at /no-answer-<lang>.wav. The paths must match
- * NO_ANSWER_ASSET in twilio/voice.js. */
+/* Serverless Asset with the "They didn't answer the phone." clip (English in
+ * this build): twilio/no_answer.wav as "no-answer", public at
+ * https://<env domain>/no-answer.wav. Path must match NO_ANSWER_ASSET in
+ * twilio/voice.js. */
 #define APP_TW_ASSET_NAME       "no-answer"
-/* SIP header with the prompt language ("en", "ca", "es", "fr", "it", "nl",
- * "de", "vi", "pt-br") on every INVITE.
+/* SIP header with the prompt language ("en" in this build) on every INVITE.
  * Twilio hands X- headers to the Function as event["SipHeader_<name>"]; must
  * match LANG_HEADER in twilio/voice.js. */
 #define APP_SIP_LANG_HEADER     "X-Kidphone-Lang"

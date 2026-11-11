@@ -191,17 +191,8 @@ footer { color: var(--muted); font-size: 14px; text-align: center; margin-top: 2
     <label for="lang">Language the phone speaks in</label>
     <select id="lang" style="max-width: 320px">
       <option value="en">English</option>
-      <option value="ca" lang="ca">Català</option>
-      <option value="es" lang="es">Español</option>
-      <option value="fr" lang="fr">Français</option>
-      <option value="it" lang="it">Italiano</option>
-      <option value="nl" lang="nl">Nederlands</option>
-      <option value="de" lang="de">Deutsch</option>
-      <option value="vi" lang="vi">Tiếng Việt</option>
-      <option value="pt-br" lang="pt-BR">Português (Brasil)</option>
     </select>
-    <p class="hint">Every sentence the phone says ("They didn't answer the phone", "Time's up", bedtime, secrets) uses this language. The sentence Twilio plays when nobody answers follows it too (after a phone software update, press <b>Run setup again</b> once). <b>Play a sample</b> says one sentence on the handset.</p>
-    <button type="button" id="b-lang">Save</button>
+    <p class="hint">This build speaks English only (keeps the firmware small enough for wireless updates later). <b>Play a sample</b> says one sentence on the handset.</p>
     <button type="button" class="secondary" id="b-lang-play">Play a sample</button>
     <p class="hint" id="lang-msg"></p>
   </section>
@@ -551,7 +542,6 @@ let pendingContacts = null; /* contacts waiting for the Auth Token ("numbers" mo
  * form is never reloaded over the edits. */
 let pendingRun = null;
 let mmDirty = false; /* call length edited, not saved yet */
-let langDirty = false; /* voice language picked, not saved yet */
 let emDirty = false; /* emergency presses edited, not saved yet */
 let bedDirty = false, bedSig = null; /* bedtime edited, not saved yet / what the form was loaded from */
 let resetting = false; /* factory reset sent: stop polling, the phone is going away */
@@ -935,7 +925,7 @@ function render() {
   const mm = $("maxmin");
   if (set.max_call_minutes && document.activeElement !== mm && !mmDirty) mm.value = set.max_call_minutes;
   if (set.max_call_minutes_lo) { mm.min = set.max_call_minutes_lo; mm.max = set.max_call_minutes_hi; }
-  if (set.lang && !langDirty) $("lang").value = set.lang;
+  $("lang").value = "en";
   const em = $("emtaps");
   if (set.emergency_taps !== undefined && document.activeElement !== em && !emDirty) em.value = set.emergency_taps ? set.emergency_taps : "";
   if (set.emergency_taps_hi) em.max = set.emergency_taps_hi;
@@ -1367,28 +1357,12 @@ $("b-emtaps").addEventListener("click", async () => {
   if (r.ok) { emDirty = false; kick(); }
 });
 
-/* ---------- voice language ---------- */
+/* ---------- voice language (English only in this build) ---------- */
 
-async function saveLang() {
-  const r = await api("/api/settings", {lang: $("lang").value});
-  $("lang-msg").textContent = r.ok ? "Saved." : (r.j.error || "Could not save. Try again.");
-  if (r.ok) { langDirty = false; kick(); }
-  return r.ok;
-}
-
-$("lang").addEventListener("change", () => { langDirty = true; $("lang-msg").textContent = ""; });
-$("b-lang").addEventListener("click", async () => {
-  $("b-lang").disabled = true;
-  await saveLang();
-  $("b-lang").disabled = false;
-});
-/* The sample plays the saved language: save a new pick first. */
 $("b-lang-play").addEventListener("click", async () => {
   $("b-lang-play").disabled = true;
-  if (!langDirty || await saveLang()) {
-    const r = await api("/api/prompt/sample", {});
-    $("lang-msg").textContent = r.ok ? "Playing on the handset." : (r.j.error || "Could not play. Try again.");
-  }
+  const r = await api("/api/prompt/sample", {});
+  $("lang-msg").textContent = r.ok ? "Playing on the handset." : (r.j.error || "Could not play. Try again.");
   $("b-lang-play").disabled = false;
 });
 

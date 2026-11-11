@@ -107,45 +107,21 @@ static const char *TAG = "provision";
 /* twilio/voice.js, embedded by src/CMakeLists.txt (EMBED_TXTFILES adds a NUL). */
 extern const char voice_js_start[] asm("_binary_voice_js_start");
 extern const char voice_js_end[] asm("_binary_voice_js_end");
-/* twilio/no_answer*.wav (8 kHz mu-law, scripts/gen_prompts.py), EMBED_FILES (no NUL). */
+/* twilio/no_answer.wav (8 kHz mu-law, scripts/gen_prompts.py), EMBED_FILES (no NUL).
+ * English only in this build. */
 #define WAV(name)                                                         \
     extern const char name##_wav_start[] asm("_binary_" #name "_wav_start"); \
     extern const char name##_wav_end[] asm("_binary_" #name "_wav_end");
 WAV(no_answer)
-WAV(no_answer_ca)
-WAV(no_answer_es)
-WAV(no_answer_fr)
-WAV(no_answer_it)
-WAV(no_answer_nl)
-WAV(no_answer_de)
-WAV(no_answer_vi)
-WAV(no_answer_pt_br)
 
-/* The no-answer clip per prompt language: Serverless Asset friendly name,
- * public path (NO_ANSWER_ASSET in twilio/voice.js), upload file name, data.
- * Uploaded one at a time (each upload_version buffer is the clip + 1 KB). */
+/* The no-answer clip: Serverless Asset friendly name, public path
+ * (NO_ANSWER_ASSET in twilio/voice.js), upload file name, data. */
 typedef struct {
     const char *name, *path, *file;
     const char *start, *end;
 } tw_asset_t;
 static const tw_asset_t k_assets[] = {
     {APP_TW_ASSET_NAME, "/" APP_TW_ASSET_NAME ".wav", "no_answer.wav", no_answer_wav_start, no_answer_wav_end},
-    {APP_TW_ASSET_NAME "-ca", "/" APP_TW_ASSET_NAME "-ca.wav", "no_answer_ca.wav", no_answer_ca_wav_start,
-     no_answer_ca_wav_end},
-    {APP_TW_ASSET_NAME "-es", "/" APP_TW_ASSET_NAME "-es.wav", "no_answer_es.wav", no_answer_es_wav_start,
-     no_answer_es_wav_end},
-    {APP_TW_ASSET_NAME "-fr", "/" APP_TW_ASSET_NAME "-fr.wav", "no_answer_fr.wav", no_answer_fr_wav_start,
-     no_answer_fr_wav_end},
-    {APP_TW_ASSET_NAME "-it", "/" APP_TW_ASSET_NAME "-it.wav", "no_answer_it.wav", no_answer_it_wav_start,
-     no_answer_it_wav_end},
-    {APP_TW_ASSET_NAME "-nl", "/" APP_TW_ASSET_NAME "-nl.wav", "no_answer_nl.wav", no_answer_nl_wav_start,
-     no_answer_nl_wav_end},
-    {APP_TW_ASSET_NAME "-de", "/" APP_TW_ASSET_NAME "-de.wav", "no_answer_de.wav", no_answer_de_wav_start,
-     no_answer_de_wav_end},
-    {APP_TW_ASSET_NAME "-vi", "/" APP_TW_ASSET_NAME "-vi.wav", "no_answer_vi.wav", no_answer_vi_wav_start,
-     no_answer_vi_wav_end},
-    {APP_TW_ASSET_NAME "-pt-br", "/" APP_TW_ASSET_NAME "-pt-br.wav", "no_answer_pt_br.wav", no_answer_pt_br_wav_start,
-     no_answer_pt_br_wav_end},
 };
 #define N_ASSETS (sizeof(k_assets) / sizeof(k_assets[0]))
 

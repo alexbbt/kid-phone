@@ -17,18 +17,11 @@
 
 #define PROMPT_RATE 16000
 
-/* Language of every clip (NVS "lang", setup page). The numbers are stored:
- * append new languages, never renumber. */
+/* Language of every clip (NVS "lang", setup page). This build ships English
+ * only so the image fits dual-slot OTA; other <name>_<lang>.pcm files stay
+ * in the tree for a multi-language build. */
 typedef enum {
     PROMPT_LANG_EN = 0, /* src/prompts/<name>.pcm */
-    PROMPT_LANG_CA,     /* src/prompts/<name>_ca.pcm */
-    PROMPT_LANG_ES,     /* src/prompts/<name>_es.pcm */
-    PROMPT_LANG_FR,     /* src/prompts/<name>_fr.pcm */
-    PROMPT_LANG_IT,     /* src/prompts/<name>_it.pcm */
-    PROMPT_LANG_NL,     /* src/prompts/<name>_nl.pcm */
-    PROMPT_LANG_DE,     /* src/prompts/<name>_de.pcm */
-    PROMPT_LANG_VI,     /* src/prompts/<name>_vi.pcm */
-    PROMPT_LANG_PT_BR,  /* src/prompts/<name>_pt_br.pcm (code "pt-br") */
     PROMPT_LANG_COUNT
 } prompt_lang_t;
 
@@ -51,8 +44,8 @@ typedef enum {
 void prompt_set_lang(prompt_lang_t lang);
 prompt_lang_t prompt_lang(void);
 
-/* "en", "ca", "es", "fr", "it", "nl", "de", "vi", "pt-br" (also the SIP
- * X-Kidphone-Lang value and the setup page's code), and back: PROMPT_LANG_COUNT for NULL or an unknown code. */
+/* "en" (also the SIP X-Kidphone-Lang value and the setup page's code).
+ * Unknown / NULL → PROMPT_LANG_COUNT. */
 const char *prompt_lang_code(prompt_lang_t lang);
 prompt_lang_t prompt_lang_from_code(const char *code);
 
